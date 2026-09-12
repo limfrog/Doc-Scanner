@@ -129,6 +129,7 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
   padding:12px 14px var(--dock-pad);
 }
 .dock .row{display:flex;gap:8px}
+.dock .row.tri .btn{font-size:14px;padding:13px 4px}
 .btn{
   flex:1;padding:13px 12px;border-radius:12px;background:#fff;border:1px solid var(--line);
   font-weight:600;text-align:center}
@@ -156,6 +157,13 @@ input[type=range]::-moz-range-track{height:4px;border-radius:2px;background:var(
 input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:var(--ink);border:3px solid #fff}
 .switch{display:flex;align-items:center;gap:8px;font-size:13.5px}
 .switch input{width:20px;height:20px;accent-color:var(--ink)}
+
+/* 확인 창 */
+.modal{position:fixed;inset:0;z-index:55;background:rgba(10,13,18,.72);display:grid;place-items:center;padding:22px}
+.modal .card{width:100%;max-width:340px;background:var(--paper);border-radius:16px;padding:18px 16px 14px}
+.modal h2{margin:0 0 6px;font-size:16.5px;font-weight:650;letter-spacing:-.01em}
+.modal p{margin:0 0 14px;font-size:13.5px;color:var(--ink-2);line-height:1.5}
+.modal .btn{width:100%;margin-top:8px}
 
 /* 처리 중 */
 .busy{position:fixed;inset:0;background:rgba(10,13,18,.78);display:grid;place-items:center;z-index:50;color:var(--paper)}
@@ -222,9 +230,10 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
 
   <!-- 홈 조작판 -->
   <footer class="dock" id="dkHome">
-    <div class="row" style="margin-bottom:8px">
-      <button class="btn main" id="btnShoot">촬영하기</button>
-      <button class="btn" id="btnPick">사진·PDF 불러오기</button>
+    <div class="row tri" style="margin-bottom:8px">
+      <button class="btn main" id="btnShoot">촬영</button>
+      <button class="btn" id="btnPick">불러오기</button>
+      <button class="btn ghost" id="btnNewDoc" disabled>새 문서</button>
     </div>
     <div class="row">
       <button class="btn" id="btnPdf" disabled>PDF 공유</button>
@@ -288,6 +297,16 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
   </footer>
 </div>
 
+<div class="modal" id="askNew" hidden>
+  <div class="card">
+    <h2>저장하지 않은 문서가 있습니다</h2>
+    <p id="askMsg">지금 새 문서를 시작하면 정리한 내용이 사라집니다.</p>
+    <button class="btn main" id="askSave">저장하고 새로 시작</button>
+    <button class="btn" id="askDiscard">저장하지 않고 새로 시작</button>
+    <button class="btn ghost" id="askCancel">취소</button>
+  </div>
+</div>
+
 <div class="busy" id="busy" hidden><div><div class="spin"></div><p id="busyMsg">처리 중</p></div></div>
 
 <div class="drop" id="drop" hidden><div>여기에 놓으면 불러옵니다</div></div>
@@ -302,7 +321,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.19';
+const BUILD='0.20';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2800;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -1154,8 +1173,9 @@ function renderHome(){
   invalidateExports();
   schedulePrewarm();
   ['#btnPdf','#btnJpg','#btnPdfSave','#btnJpgSave'].forEach(s=>$(s).disabled=!n);
+  $('#btnNewDoc').disabled=!n;
   $('#homeHint').textContent = n
-    ? (SHARE_OK ? '보낼 앱이 목록에 없으면 다른 형식으로 시도해 보세요' : `${n}장을 한 파일의 PDF로 묶어 저장합니다`)
+    ? (isDirty() ? '아직 저장하지 않았습니다' : '모든 쪽을 저장했습니다')
     : '기기 카메라로 찍으면 가장 선명하게 저장됩니다';
   if(!n){
     box.innerHTML=`<div class="empty"><div class="mark"></div>
@@ -1642,8 +1662,9 @@ try{
   SHARE_OK=!!(navigator.share && navigator.canShare && navigator.canShare({files:[probe]}));
 }catch(e){ SHARE_OK=false; }
 
-let pagesVer=0, exportCache={ver:-1,pdf:null}, prewarmT=null;
+let pagesVer=0, exportedVer=-1, exportCache={ver:-1,pdf:null}, prewarmT=null;
 function invalidateExports(){ pagesVer++; }
+function isDirty(){ return state.pages.length>0 && exportedVer!==pagesVer; }
 function schedulePrewarm(){
   clearTimeout(prewarmT);
   if(!state.pages.length) return;
@@ -1662,9 +1683,9 @@ async function deliver(files,forceSave){
   if(!forceSave && SHARE_OK && navigator.canShare && navigator.canShare({files})){
     try{
       await navigator.share({files});   // 받는 앱 목록을 넓히려고 제목·본문 없이 파일만 넘깁니다
-      return;
+      return 'shared';
     }catch(e){
-      if(e && (e.name==='AbortError'||e.name==='CanceledError')) return; // 사용자가 닫음
+      if(e && (e.name==='AbortError'||e.name==='CanceledError')) return 'cancelled';
       toast('공유 창을 열지 못해 기기에 저장합니다');
     }
   }
@@ -1673,7 +1694,9 @@ async function deliver(files,forceSave){
     if(i<files.length-1) await new Promise(r=>setTimeout(r,700));
   }
   toast(files.length>1?`${files.length}개 파일을 저장했습니다`:'기기에 저장했습니다');
+  return 'saved';
 }
+function markExported(){ exportedVer=pagesVer; $('#homeHint').textContent='모든 쪽을 저장했습니다'; }
 async function sendJpg(pages,label,forceSave){
   if(!pages.length) return;
   const t=stamp();
@@ -1681,7 +1704,10 @@ async function sendJpg(pages,label,forceSave){
     const num = label!=null ? label : i+1;
     return new File([pg.blob],`scan_${t}_${String(num).padStart(2,'0')}.jpg`,{type:'image/jpeg'});
   });
-  await deliver(files,forceSave);
+  const r=await deliver(files,forceSave);
+  const whole = pages.length===state.pages.length && pages.every((p,i)=>p===state.pages[i]);
+  if(whole && r!=='cancelled') markExported();
+  return r;
 }
 async function sendPdf(forceSave){
   if(!state.pages.length) return;
@@ -1693,7 +1719,9 @@ async function sendPdf(forceSave){
     unbusy();
   }
   const file=new File([blob],`scan_${stamp()}.pdf`,{type:'application/pdf'});
-  await deliver([file],forceSave);
+  const r=await deliver([file],forceSave);
+  if(r!=='cancelled') markExported();
+  return r;
 }
 /* ---------------- 칩·슬라이더 ---------------- */
 function buildChips(host,items,getKey,onPick){
@@ -1769,6 +1797,30 @@ $('#btnReset').addEventListener('click',()=>{
   state.opts.params={...DEFAULTS};
   if(state.work) state.work.params={...DEFAULTS};
   syncChips(); syncSliders(); queueRender();
+});
+
+/* ---------------- 새 문서 ---------------- */
+function resetAll(){
+  state.pages=[]; state.work=null; state.imports=[]; previewData=null;
+  cancelQueue();
+  exportCache={ver:-1,pdf:null};
+  renderHome(); exportedVer=pagesVer; setView('home');
+  toast('새 문서를 시작합니다');
+}
+function askNewDoc(){
+  if(!state.pages.length && !state.work){ resetAll(); return; }
+  if(!isDirty()){ resetAll(); return; }
+  $('#askMsg').textContent=`${state.pages.length}쪽을 아직 저장하거나 공유하지 않았습니다. 지금 새로 시작하면 사라집니다.`;
+  $('#askNew').hidden=false;
+}
+$('#btnNewDoc').addEventListener('click',askNewDoc);
+$('#askCancel').addEventListener('click',()=>{ $('#askNew').hidden=true; });
+$('#askDiscard').addEventListener('click',()=>{ $('#askNew').hidden=true; resetAll(); });
+$('#askSave').addEventListener('click',async()=>{
+  $('#askNew').hidden=true;
+  const r=await sendPdf(false);
+  if(r==='cancelled'){ toast('저장을 취소해 문서를 그대로 두었습니다'); return; }
+  if(!isDirty()) resetAll();
 });
 
 /* ---------------- 버튼 ---------------- */

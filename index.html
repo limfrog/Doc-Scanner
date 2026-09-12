@@ -290,9 +290,9 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.15';
+const BUILD='0.16';
 const $ = s => document.querySelector(s);
-const MAX_SRC = 2400;        // 원본 작업 해상도(긴 변)
+const MAX_SRC = 2800;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
 const MAX_PIXELS = 11e6;     // 최종 출력 픽셀 상한
 
@@ -308,6 +308,7 @@ const PAPERS = [
 const DPIS = [{v:150,name:'표준 150dpi'},{v:200,name:'고화질 200dpi'},{v:300,name:'최고 300dpi'}];
 const MODES = [
   {id:'bw',    name:'흑백 문서'},
+  {id:'line',  name:'얇은 선·악보'},
   {id:'gray',  name:'회색조'},
   {id:'color', name:'컬러 문서'},
   {id:'orig',  name:'원본'},
@@ -362,6 +363,21 @@ function stamp(){
 }
 
 /* ---------------- 이미지 읽기 ---------------- */
+/* 한 번에 크게 줄이면 가는 선이 깨지므로 절반씩 단계적으로 줄입니다 */
+function drawScaledTo(img,sw,sh,dw,dh){
+  let cur=img, cw=sw, ch=sh;
+  while(cw>dw*2 && ch>dh*2){
+    const nw=Math.max(dw,Math.round(cw/2)), nh=Math.max(dh,Math.round(ch/2));
+    const t=newCanvas(nw,nh), tc=ctx2d(t);
+    tc.imageSmoothingEnabled=true; tc.imageSmoothingQuality='high';
+    tc.drawImage(cur,0,0,nw,nh);
+    cur=t; cw=nw; ch=nh;
+  }
+  const out=newCanvas(dw,dh), oc=ctx2d(out);
+  oc.imageSmoothingEnabled=true; oc.imageSmoothingQuality='high';
+  oc.drawImage(cur,0,0,dw,dh);
+  return out;
+}
 async function fileToCanvas(file){
   let bmp=null;
   try{ bmp = await createImageBitmap(file,{imageOrientation:'from-image'}); }
@@ -375,8 +391,7 @@ async function fileToCanvas(file){
   }
   const iw=bmp.width||bmp.naturalWidth, ih=bmp.height||bmp.naturalHeight;
   const s=Math.min(1, MAX_SRC/Math.max(iw,ih));
-  const c=newCanvas(Math.max(1,Math.round(iw*s)),Math.max(1,Math.round(ih*s)));
-  ctx2d(c).drawImage(bmp,0,0,c.width,c.height);
+  const c=drawScaledTo(bmp,iw,ih,Math.max(1,Math.round(iw*s)),Math.max(1,Math.round(ih*s)));
   if(bmp.close) bmp.close();
   return c;
 }
@@ -419,9 +434,7 @@ async function sourceToCanvas(src,maxSide){
     const c=src.canvas, lim=maxSide||MAX_SRC;
     const s=Math.min(1,lim/Math.max(c.width,c.height));
     if(s>=1) return c;
-    const o=newCanvas(Math.round(c.width*s),Math.round(c.height*s));
-    ctx2d(o).drawImage(c,0,0,o.width,o.height);
-    return o;
+    return drawScaledTo(c,c.width,c.height,Math.round(c.width*s),Math.round(c.height*s));
   }
   return fileToCanvas(src.file);
 }
@@ -549,30 +562,84 @@ function solveH(sp,dp){ // sp(4) -> dp(4)
   }
   return M.map(r=>r[n]);
 }
+/* 넓은 영역을 한 픽셀로 줄일 때 쓰는 박스 평균 축소 — 가는 선이 사라지거나 들쭉날쭉해지는 것을 막습니다 */
+function boxDownscale(src,k){
+  const dw=Math.max(1,Math.round(src.width*k)), dh=Math.max(1,Math.round(src.height*k));
+  if(dw>=src.width||dh>=src.height) return src;
+  const sw=src.width, sh=src.height;
+  const sd=ctx2d(src).getImageData(0,0,sw,sh).data;
+  const out=newCanvas(dw,dh), octx=ctx2d(out);
+  const oi=octx.createImageData(dw,dh), od=oi.data;
+  const fx=sw/dw, fy=sh/dh;
+  for(let y=0;y<dh;y++){
+    const y0=Math.floor(y*fy), y1=Math.min(sh,Math.max(y0+1,Math.floor((y+1)*fy)));
+    for(let x=0;x<dw;x++){
+      const x0=Math.floor(x*fx), x1=Math.min(sw,Math.max(x0+1,Math.floor((x+1)*fx)));
+      let r=0,g=0,b=0,n=0;
+      for(let yy=y0;yy<y1;yy++){
+        let i=(yy*sw+x0)*4;
+        for(let xx=x0;xx<x1;xx++,i+=4){ r+=sd[i]; g+=sd[i+1]; b+=sd[i+2]; n++; }
+      }
+      const o=(y*dw+x)*4;
+      od[o]=r/n; od[o+1]=g/n; od[o+2]=b/n; od[o+3]=255;
+    }
+  }
+  octx.putImageData(oi,0,0);
+  return out;
+}
 function warp(src,quad,outW,outH){
+  const dist=(p,q)=>Math.hypot(p.x-q.x,p.y-q.y);
+  const measure=q=>({
+    w:(dist(q[0],q[1])+dist(q[3],q[2]))/2,
+    h:(dist(q[0],q[3])+dist(q[1],q[2]))/2});
+  // 1) 축소가 큰 경우 먼저 박스 평균으로 줄여 둡니다(밉맵과 같은 원리)
+  let m=measure(quad);
+  const ratio0=Math.max(m.w/outW,m.h/outH);
+  if(ratio0>1.25){
+    const pre=boxDownscale(src,1/ratio0);
+    const kx=pre.width/src.width, ky=pre.height/src.height;
+    quad=quad.map(p=>({x:p.x*kx,y:p.y*ky}));
+    src=pre;
+    m=measure(quad);
+  }
+  // 2) 남은 축소분은 픽셀당 여러 표본으로 처리합니다
+  const ratio=Math.max(m.w/outW,m.h/outH);
+  const ss = ratio<=1.15 ? 1 : ratio<=2.2 ? 2 : 3;
+  const step=1/ss, base=(step-1)/2, nsamp=ss*ss;
+
   const rect=[{x:0,y:0},{x:outW-1,y:0},{x:outW-1,y:outH-1},{x:0,y:outH-1}];
   const H=solveH(rect,quad);
   const out=newCanvas(outW,outH), octx=ctx2d(out);
   if(!H){ octx.drawImage(src,0,0,outW,outH); return out; }
   const [a,b,c,d,e,f,g,h]=H;
-  const sctx=ctx2d(src), si=sctx.getImageData(0,0,src.width,src.height).data;
+  const si=ctx2d(src).getImageData(0,0,src.width,src.height).data;
   const sw=src.width, sh=src.height;
   const oi=octx.createImageData(outW,outH), od=oi.data;
+  const acc=new Float64Array(3);
+  const sample=(u,v)=>{
+    if(u<0)u=0; else if(u>sw-1)u=sw-1;
+    if(v<0)v=0; else if(v>sh-1)v=sh-1;
+    const x0=u|0, y0=v|0, x1=x0<sw-1?x0+1:x0, y1=y0<sh-1?y0+1:y0;
+    const dx=u-x0, dy=v-y0, w00=(1-dx)*(1-dy), w10=dx*(1-dy), w01=(1-dx)*dy, w11=dx*dy;
+    const i00=(y0*sw+x0)*4, i10=(y0*sw+x1)*4, i01=(y1*sw+x0)*4, i11=(y1*sw+x1)*4;
+    acc[0]+=si[i00]*w00+si[i10]*w10+si[i01]*w01+si[i11]*w11;
+    acc[1]+=si[i00+1]*w00+si[i10+1]*w10+si[i01+1]*w01+si[i11+1]*w11;
+    acc[2]+=si[i00+2]*w00+si[i10+2]*w10+si[i01+2]*w01+si[i11+2]*w11;
+  };
   let o=0;
   for(let y=0;y<outH;y++){
-    const bx=b*y+c, ex=e*y+f, hx=h*y+1;
     for(let x=0;x<outW;x++,o+=4){
-      const den=g*x+hx;
-      let u=(a*x+bx)/den, v=(d*x+ex)/den;
-      if(u<0)u=0; else if(u>sw-1)u=sw-1;
-      if(v<0)v=0; else if(v>sh-1)v=sh-1;
-      const x0=u|0, y0=v|0, x1=x0<sw-1?x0+1:x0, y1=y0<sh-1?y0+1:y0;
-      const fx=u-x0, fy=v-y0, w00=(1-fx)*(1-fy), w10=fx*(1-fy), w01=(1-fx)*fy, w11=fx*fy;
-      const i00=(y0*sw+x0)*4, i10=(y0*sw+x1)*4, i01=(y1*sw+x0)*4, i11=(y1*sw+x1)*4;
-      od[o]  =si[i00]*w00+si[i10]*w10+si[i01]*w01+si[i11]*w11;
-      od[o+1]=si[i00+1]*w00+si[i10+1]*w10+si[i01+1]*w01+si[i11+1]*w11;
-      od[o+2]=si[i00+2]*w00+si[i10+2]*w10+si[i01+2]*w01+si[i11+2]*w11;
-      od[o+3]=255;
+      acc[0]=acc[1]=acc[2]=0;
+      for(let sy=0;sy<ss;sy++){
+        const yy=y+base+sy*step;
+        const bx=b*yy+c, ex=e*yy+f, hx=h*yy+1;
+        for(let sx=0;sx<ss;sx++){
+          const xx=x+base+sx*step;
+          const den=g*xx+hx;
+          sample((a*xx+bx)/den,(d*xx+ex)/den);
+        }
+      }
+      od[o]=acc[0]/nsamp; od[o+1]=acc[1]/nsamp; od[o+2]=acc[2]/nsamp; od[o+3]=255;
     }
   }
   octx.putImageData(oi,0,0);
@@ -622,7 +689,7 @@ function enhance(img,o){
       const fx=clamp(x/cell-0.5,0,cols-1), i0=Math.floor(fx);
       gx0[x]=i0; gx1[x]=Math.min(cols-1,i0+1); gwx[x]=fx-i0;
     }
-    const gray = (o.mode==='bw'||o.mode==='gray');
+    const gray = (o.mode==='bw'||o.mode==='gray'||o.mode==='line');
     for(let y=0;y<h;y++){
       const fy=clamp(y/cell-0.5,0,rows-1), j0=Math.floor(fy), j1=Math.min(rows-1,j0+1), wy=fy-j0;
       let i=y*w*4;
@@ -641,11 +708,12 @@ function enhance(img,o){
       }
     }
   }
-  // 2) 선명하게(언샵 마스크)
-  if(o.sharpen && o.mode!=='orig') unsharp(img,0.85);
+  // 2) 선명하게(언샵 마스크) — 가는 선은 과한 샤픈이 계단을 키우므로 약하게
+  if(o.sharpen && o.mode!=='orig') unsharp(img, o.mode==='line'?0.55:0.85);
   // 3) 레벨 + 밝기/대비 (+ 흑백 모드는 부드러운 임계)
   const lut=new Uint8ClampedArray(256);
-  const lo = o.mode==='orig' ? 0 : (o.ink/100)*0.62*255;
+  const inkK = 0.62;
+  const lo = o.mode==='orig' ? 0 : (o.ink/100)*inkK*255;
   const hi = o.mode==='orig' ? 255 : 236;
   const span=Math.max(1,hi-lo);
   const cf=(259*(o.contrast+255))/(255*(259-o.contrast));

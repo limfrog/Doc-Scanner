@@ -51,6 +51,12 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 .bar .go[disabled]{opacity:.4}
 .build{flex:0 0 auto;font-size:11px;font-weight:600;color:#7f8a9b;letter-spacing:.01em;padding:4px 7px;border:1px solid rgba(255,255,255,.12);border-radius:7px;font-variant-numeric:tabular-nums}
 
+/* 업데이트 알림 */
+.update{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:9px 12px 9px 14px;background:var(--lamp);color:var(--lamp-ink)}
+.update span{flex:1;min-width:0;font-size:13.5px;font-weight:600}
+.update .up{padding:7px 13px;border-radius:9px;background:var(--lamp-ink);color:var(--lamp);font-size:13px;font-weight:650}
+.update .later{width:30px;height:30px;border-radius:8px;font-size:14px;display:grid;place-items:center;opacity:.7}
+
 /* ---------- 본문 ---------- */
 .stage{flex:1 1 auto;min-height:0;position:relative;overflow:hidden}
 .stage.dark{background:
@@ -170,6 +176,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
     <span class="build" id="buildTag" title="빌드 번호">v0.10</span>
   </header>
 
+  <div class="update" id="updateBar" hidden>
+    <span id="updateMsg">새 버전이 있습니다</span>
+    <button class="up" id="btnUpdate">업데이트</button>
+    <button class="later" id="btnLater" aria-label="나중에">✕</button>
+  </div>
+
   <!-- 홈 -->
   <section class="stage sheet" id="stHome">
     <div class="home-wrap" id="pageList"></div>
@@ -278,7 +290,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.14';
+const BUILD='0.15';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2400;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -1332,6 +1344,47 @@ async function buildPdf(pages){
   str(`trailer\n<< /Size ${total+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
   return new Blob(parts,{type:'application/pdf'});
 }
+/* ---------------- 새 버전 확인 ---------------- */
+let lastCheck=0, newBuild=null;
+function cmpBuild(a,b){
+  const A=String(a).split('.').map(Number), B=String(b).split('.').map(Number);
+  for(let i=0;i<Math.max(A.length,B.length);i++){
+    const x=A[i]||0, y=B[i]||0;
+    if(x!==y) return x-y;
+  }
+  return 0;
+}
+async function checkUpdate(force){
+  const now=Date.now();
+  if(!force && now-lastCheck<10*60*1000) return;
+  lastCheck=now;
+  if(location.protocol==='file:') return;
+  try{
+    const url=location.href.split('#')[0].split('?')[0]+'?_='+now;
+    const res=await fetch(url,{cache:'no-store'});
+    if(!res.ok) return;
+    const txt=await res.text();
+    const m=txt.match(/const\s+BUILD\s*=\s*'([\d.]+)'/);
+    if(!m || cmpBuild(m[1],BUILD)<=0) return;
+    newBuild=m[1];
+    $('#updateMsg').textContent=`새 버전 v${newBuild}이 나왔습니다`;
+    $('#updateBar').hidden=false;
+  }catch(e){ /* 오프라인이면 조용히 넘어갑니다 */ }
+}
+async function applyUpdate(){
+  if(state.pages.length||state.work||state.imports.length){
+    if(!confirm('정리 중인 문서가 사라집니다. 업데이트할까요?')) return;
+  }
+  try{
+    if(window.caches&&caches.keys){
+      const keys=await caches.keys();
+      await Promise.all(keys.map(k=>caches.delete(k)));
+    }
+  }catch(e){}
+  const base=location.href.split('#')[0].split('?')[0];
+  location.replace(base+'?v='+(newBuild||Date.now()));
+}
+
 /* ---------------- 내보내기: 공유 우선, 저장은 대비책 ---------------- */
 let SHARE_OK=false;
 try{
@@ -1565,6 +1618,8 @@ document.addEventListener('selectstart',e=>{ if(drag.active) e.preventDefault();
 document.addEventListener('contextmenu',e=>{
   if(e.target&&e.target.tagName==='CANVAS') e.preventDefault();
 });
+$('#btnUpdate').addEventListener('click',applyUpdate);
+$('#btnLater').addEventListener('click',()=>{ $('#updateBar').hidden=true; });
 document.addEventListener('visibilitychange',()=>{ if(document.hidden) stopCam(); });
 window.addEventListener('pagehide',stopCam);
 
@@ -1573,6 +1628,10 @@ document.title='Doc Scanner v'+BUILD;
 renderHome();
 syncChips();
 setView('home');
+setTimeout(()=>checkUpdate(true),1200);
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden) checkUpdate(false); });
+window.addEventListener('online',()=>checkUpdate(true));
+$('#buildTag').addEventListener('click',()=>{ checkUpdate(true); toast('새 버전을 확인합니다'); });
 </script>
 </body>
 </html>

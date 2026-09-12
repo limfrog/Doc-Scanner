@@ -7,7 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>문서 스캐너</title>
+<title>Doc Scanner</title>
 <style>
 :root{
   --stage:#12161d;          /* 암실: 이미지 판단용 어두운 배경 */
@@ -46,6 +46,7 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 .bar .icon{width:38px;height:38px;border-radius:10px;background:rgba(255,255,255,.08);font-size:17px;display:grid;place-items:center}
 .bar .go{padding:9px 16px;border-radius:10px;background:var(--lamp);color:var(--lamp-ink);font-weight:650}
 .bar .go[disabled]{opacity:.4}
+.build{flex:0 0 auto;font-size:11px;font-weight:600;color:#7f8a9b;letter-spacing:.01em;padding:4px 7px;border:1px solid rgba(255,255,255,.12);border-radius:7px;font-variant-numeric:tabular-nums}
 
 /* ---------- 본문 ---------- */
 .stage{flex:1 1 auto;min-height:0;position:relative;overflow:hidden}
@@ -109,6 +110,8 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 .btn.ghost{background:transparent}
 .btn[disabled]{opacity:.4}
 .hint{margin:9px 2px 0;font-size:12px;color:var(--ink-2);text-align:center}
+.link{font-size:12px;font-weight:650;color:var(--ink);text-decoration:underline;text-underline-offset:3px;padding:3px 5px}
+.link[disabled]{opacity:.4;text-decoration:none}
 
 /* 칩 */
 .chips{display:flex;gap:7px;overflow-x:auto;padding-bottom:2px;margin-bottom:10px;scrollbar-width:none}
@@ -148,10 +151,11 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
   <header class="bar">
     <button id="backBtn" class="icon" hidden aria-label="뒤로">‹</button>
     <div class="grow">
-      <h1 id="vTitle">문서 스캐너</h1>
-      <p id="vSub">촬영한 문서를 반듯하게 펴고 깨끗하게 정리합니다</p>
+      <h1 id="vTitle">Doc Scanner</h1>
+      <p id="vSub">촬영하거나 저장된 사진·PDF를 불러와 문서로 정리합니다</p>
     </div>
     <button id="nextBtn" class="go" hidden>다음</button>
+    <span class="build" id="buildTag" title="빌드 번호">v0.10</span>
   </header>
 
   <!-- 홈 -->
@@ -183,10 +187,14 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
       <button class="btn" id="btnPick">사진·PDF 불러오기</button>
     </div>
     <div class="row">
-      <button class="btn" id="btnPdf" disabled>PDF로 저장</button>
-      <button class="btn" id="btnPng" disabled>PNG로 저장</button>
+      <button class="btn" id="btnPdf" disabled>PDF 공유</button>
+      <button class="btn" id="btnPng" disabled>PNG 공유</button>
     </div>
     <p class="hint" id="homeHint">기기 카메라로 찍으면 가장 선명하게 저장됩니다</p>
+    <p class="hint" id="saveLine" hidden>기기에 바로 저장
+      <button class="link" id="btnPdfSave" disabled>PDF</button>
+      <button class="link" id="btnPngSave" disabled>PNG</button>
+    </p>
   </footer>
 
   <!-- 불러오기 조작판 -->
@@ -241,6 +249,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → PNG·PDF
    ========================================================= */
 
+const BUILD='0.10';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2400;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -637,7 +646,7 @@ function unsharp(img,amount){
 
 /* ---------------- 화면 전환 ---------------- */
 const VIEWS={
-  home:{title:'문서 스캐너',sub:'촬영하거나 저장된 사진·PDF를 불러와 문서로 정리합니다'},
+  home:{title:'Doc Scanner',sub:'촬영하거나 저장된 사진·PDF를 불러와 문서로 정리합니다'},
   import:{title:'불러온 항목',sub:'문서로 만들 것을 고르세요'},
   crop:{title:'가장자리 맞추기',sub:'모서리를 끌어 문서 경계에 맞추세요'},
   edit:{title:'배경과 잉크 다듬기',sub:'배경은 희게, 글자는 진하게 조절합니다'},
@@ -799,8 +808,12 @@ function cancelQueue(){
 function renderHome(){
   const box=$('#pageList');
   const n=state.pages.length;
-  $('#btnPdf').disabled=!n; $('#btnPng').disabled=!n;
-  $('#homeHint').textContent = n ? `${n}장을 한 파일의 PDF로 묶어 저장합니다` : '기기 카메라로 찍으면 가장 선명하게 저장됩니다';
+  invalidateExports();
+  schedulePrewarm();
+  ['#btnPdf','#btnPng','#btnPdfSave','#btnPngSave'].forEach(s=>$(s).disabled=!n);
+  $('#homeHint').textContent = n
+    ? (SHARE_OK ? `${n}장을 한 파일의 PDF로 묶어 다른 앱으로 보냅니다` : `${n}장을 한 파일의 PDF로 묶어 저장합니다`)
+    : '기기 카메라로 찍으면 가장 선명하게 저장됩니다';
   if(!n){
     box.innerHTML=`<div class="empty"><div class="mark"></div>
       <h2>아직 스캔한 문서가 없습니다</h2>
@@ -821,7 +834,7 @@ function renderHome(){
       <div class="acts">
         <button class="mini" data-act="up" ${i===0?'disabled':''} aria-label="위로">↑</button>
         <button class="mini" data-act="down" ${i===n-1?'disabled':''} aria-label="아래로">↓</button>
-        <button class="mini" data-act="png" aria-label="PNG로 저장">↓P</button>
+        <button class="mini" data-act="png" aria-label="이 쪽 PNG 공유">↗</button>
         <button class="mini del" data-act="del" aria-label="삭제">✕</button>
       </div>`;
     row.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>pageAction(b.dataset.act,i)));
@@ -833,7 +846,7 @@ function pageAction(act,i){
   if(act==='up'&&i>0){ [P[i-1],P[i]]=[P[i],P[i-1]]; renderHome(); }
   else if(act==='down'&&i<P.length-1){ [P[i+1],P[i]]=[P[i],P[i+1]]; renderHome(); }
   else if(act==='del'){ P.splice(i,1); renderHome(); toast('문서를 삭제했습니다'); }
-  else if(act==='png'){ savePng([P[i]],i+1); }
+  else if(act==='png'){ sendPng([P[i]],i+1); }
 }
 
 /* ---------------- 자르기 화면 ---------------- */
@@ -1064,32 +1077,92 @@ async function buildPdf(pages){
   str(`trailer\n<< /Size ${total+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
   return new Blob(parts,{type:'application/pdf'});
 }
-async function savePdf(){
-  busy('PDF를 만드는 중');
-  await nextFrame();
-  try{
-    const blob=await buildPdf(state.pages);
-    download(blob,`scan_${stamp()}.pdf`);
-    unbusy(); toast(`${state.pages.length}장을 PDF로 저장했습니다`);
-  }catch(e){ unbusy(); toast('PDF를 만들지 못했습니다'); }
+/* ---------------- 내보내기: 공유 우선, 저장은 대비책 ---------------- */
+let SHARE_OK=false;
+try{
+  const probe=new File([new Blob(['%PDF-1.4'],{type:'application/pdf'})],'probe.pdf',{type:'application/pdf'});
+  SHARE_OK=!!(navigator.share && navigator.canShare && navigator.canShare({files:[probe]}));
+}catch(e){ SHARE_OK=false; }
+
+let pagesVer=0, exportCache={ver:-1,pdf:null,pngs:null}, prewarmT=null;
+function invalidateExports(){ pagesVer++; }
+function schedulePrewarm(){
+  clearTimeout(prewarmT);
+  if(!state.pages.length) return;
+  prewarmT=setTimeout(()=>prewarm(),700);
 }
-async function savePng(pages,label){
-  busy('PNG로 변환하는 중');
-  await nextFrame();
+async function prewarm(){
+  const v=pagesVer;
+  if(exportCache.ver===v || !state.pages.length) return;
   try{
-    for(let i=0;i<pages.length;i++){
-      const pg=pages[i];
-      const bmp=await createImageBitmap(pg.blob);
-      const c=newCanvas(bmp.width,bmp.height);
-      ctx2d(c).drawImage(bmp,0,0);
-      if(bmp.close) bmp.close();
-      const blob=await toBlob(c,'image/png');
-      const num=label!=null?label:i+1;
-      download(blob,`scan_${stamp()}_${String(num).padStart(2,'0')}.png`);
-      if(i<pages.length-1) await new Promise(r=>setTimeout(r,700));
+    const pdf=await buildPdf(state.pages);
+    if(v!==pagesVer) return;
+    const pngs=[];
+    for(const pg of state.pages){
+      const b=await pageToPng(pg);
+      if(v!==pagesVer) return;
+      pngs.push(b);
     }
-    unbusy(); toast(pages.length>1?`${pages.length}장을 PNG로 저장했습니다`:'PNG로 저장했습니다');
-  }catch(e){ unbusy(); toast('PNG를 만들지 못했습니다'); }
+    exportCache={ver:v,pdf,pngs};
+  }catch(e){ /* 준비 실패해도 누를 때 다시 만듭니다 */ }
+}
+async function pageToPng(pg){
+  const bmp=await createImageBitmap(pg.blob);
+  const c=newCanvas(bmp.width,bmp.height);
+  ctx2d(c).drawImage(bmp,0,0);
+  if(bmp.close) bmp.close();
+  return await toBlob(c,'image/png');
+}
+async function deliver(files,title,forceSave){
+  if(!forceSave && SHARE_OK && navigator.canShare && navigator.canShare({files})){
+    try{
+      await navigator.share({files,title});
+      return;
+    }catch(e){
+      if(e && (e.name==='AbortError'||e.name==='CanceledError')) return; // 사용자가 닫음
+      toast('공유 창을 열지 못해 기기에 저장합니다');
+    }
+  }
+  for(let i=0;i<files.length;i++){
+    download(files[i],files[i].name);
+    if(i<files.length-1) await new Promise(r=>setTimeout(r,700));
+  }
+  toast(files.length>1?`${files.length}개 파일을 저장했습니다`:'기기에 저장했습니다');
+}
+async function sendPdf(forceSave){
+  if(!state.pages.length) return;
+  let blob = exportCache.ver===pagesVer ? exportCache.pdf : null;
+  if(!blob){
+    busy('PDF를 만드는 중'); await nextFrame();
+    try{ blob=await buildPdf(state.pages); }
+    catch(e){ unbusy(); toast('PDF를 만들지 못했습니다'); return; }
+    unbusy();
+  }
+  const file=new File([blob],`scan_${stamp()}.pdf`,{type:'application/pdf'});
+  await deliver([file],`스캔 문서 ${state.pages.length}장`,forceSave);
+}
+async function sendPng(pages,label,forceSave){
+  if(!pages.length) return;
+  const all = pages===state.pages;
+  let blobs = (all && exportCache.ver===pagesVer) ? exportCache.pngs : null;
+  if(!blobs){
+    busy('PNG로 변환하는 중'); await nextFrame();
+    try{
+      blobs=[];
+      for(let i=0;i<pages.length;i++){
+        $('#busyMsg').textContent=pages.length>1?`PNG로 변환하는 중 ${i+1}/${pages.length}`:'PNG로 변환하는 중';
+        await nextFrame();
+        blobs.push(await pageToPng(pages[i]));
+      }
+    }catch(e){ unbusy(); toast('PNG를 만들지 못했습니다'); return; }
+    unbusy();
+  }
+  const t=stamp();
+  const files=blobs.map((b,i)=>{
+    const num = label!=null ? label : i+1;
+    return new File([b],`scan_${t}_${String(num).padStart(2,'0')}.png`,{type:'image/png'});
+  });
+  await deliver(files,files.length>1?`스캔 문서 ${files.length}장`:'스캔 문서',forceSave);
 }
 
 /* ---------------- 칩·슬라이더 ---------------- */
@@ -1183,8 +1256,12 @@ $('#btnSkip').addEventListener('click',()=>{
   state.queueDone++;
   nextInQueue();
 });
-$('#btnPdf').addEventListener('click',savePdf);
-$('#btnPng').addEventListener('click',()=>savePng(state.pages));
+$('#btnPdf').addEventListener('click',()=>sendPdf(false));
+$('#btnPng').addEventListener('click',()=>sendPng(state.pages,null,false));
+$('#btnPdfSave').addEventListener('click',()=>sendPdf(true));
+$('#btnPngSave').addEventListener('click',()=>sendPng(state.pages,null,true));
+if(SHARE_OK){ $('#saveLine').hidden=false; }
+else{ $('#btnPdf').textContent='PDF로 저장'; $('#btnPng').textContent='PNG로 저장'; }
 $('#btnAuto').addEventListener('click',()=>{
   const wk=state.work; if(!wk) return;
   const q=autoDetect(wk.src);
@@ -1251,6 +1328,8 @@ window.addEventListener('orientationchange',()=>setTimeout(()=>{
 },250));
 document.addEventListener('gesturestart',e=>e.preventDefault());
 
+$('#buildTag').textContent='v'+BUILD;
+document.title='Doc Scanner v'+BUILD;
 renderHome();
 syncChips();
 setView('home');

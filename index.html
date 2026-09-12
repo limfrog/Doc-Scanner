@@ -80,14 +80,22 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 .empty p{margin:0;font-size:14px}
 
 .page-row{
-  display:flex;gap:12px;align-items:center;padding:10px;margin-bottom:10px;
-  background:#fff;border:1px solid var(--line);border-radius:var(--r)}
-.page-row img{width:62px;height:84px;object-fit:cover;border-radius:6px;background:var(--paper-2);border:1px solid var(--line)}
+  display:flex;gap:9px;align-items:center;padding:10px;margin-bottom:10px;
+  background:#fff;border:1px solid var(--line);border-radius:var(--r);
+  transition:transform .13s ease;will-change:transform}
+.page-row.dragging{transition:none;position:relative;z-index:5;border-color:var(--ink);box-shadow:0 10px 22px rgba(0,0,0,.2)}
+.row-handle{flex:0 0 auto;width:24px;align-self:stretch;display:grid;place-items:center;
+  color:var(--ink-2);font-size:17px;background:none;border:0;padding:0;
+  touch-action:none;cursor:grab}
+.row-handle:active{cursor:grabbing;color:var(--ink)}
+.page-row .thumb{position:relative;padding:0;border:0;background:none;line-height:0;flex:0 0 auto}
+.page-row .thumb .pen{position:absolute;right:-5px;bottom:-5px;width:21px;height:21px;border-radius:50%;background:var(--ink);color:var(--paper);font-size:11px;display:grid;place-items:center;line-height:1}
+.page-row img{width:56px;height:76px;object-fit:cover;border-radius:6px;background:var(--paper-2);border:1px solid var(--line)}
 .page-row .meta{flex:1;min-width:0}
 .page-row .n{font-weight:650;font-size:14.5px}
-.page-row .d{font-size:12.5px;color:var(--ink-2);margin-top:2px}
-.page-row .acts{display:flex;gap:6px}
-.mini{width:36px;height:36px;border-radius:9px;background:var(--paper);border:1px solid var(--line);display:grid;place-items:center;font-size:15px}
+.page-row .d{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink-2);margin-top:2px}
+.page-row .acts{display:flex;gap:5px}
+.mini{width:34px;height:34px;border-radius:9px;background:var(--paper);border:1px solid var(--line);display:grid;place-items:center;font-size:15px}
 .mini.del{color:var(--danger)}
 .mini[disabled]{opacity:.35}
 
@@ -294,7 +302,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.17';
+const BUILD='0.19';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2800;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -1098,12 +1106,14 @@ async function processSource(src){
     const small=k<1?boxDownscale(full,k):full;
     params=analyzeDoc(ctx2d(small).getImageData(0,0,small.width,small.height));
   }
+  const rawBlob=await toBlob(full,'image/jpeg',0.92);   // 다시 다듬기용 보정 전 이미지
   enhance(img,params);
   fctx.putImageData(img,0,0);
   const blob=await toBlob(full,'image/jpeg',0.94);
   const tw=200, th=Math.max(1,Math.round(h*tw/w));
   const tc=newCanvas(tw,th); ctx2d(tc).drawImage(full,0,0,tw,th);
-  return {blob,w,h,paper:o.paper,dpi:o.dpi,thumb:tc.toDataURL('image/jpeg',0.7)};
+  return {blob,w,h,paper:o.paper,dpi:o.dpi,
+    thumb:tc.toDataURL('image/jpeg',0.7),raw:rawBlob,params:{...params}};
 }
 async function batchAll(){
   const sel=state.imports.filter(i=>i.selected&&i.ok);
@@ -1159,7 +1169,10 @@ function renderHome(){
     const row=document.createElement('div');
     row.className='page-row';
     row.innerHTML=`
-      <img src="${pg.thumb}" alt="${i+1}번째 문서 미리보기">
+      <button class="thumb" data-act="edit" aria-label="${i+1}쪽 다시 다듬기">
+        <img src="${pg.thumb}" alt="${i+1}번째 문서 미리보기"><span class="pen">✎</span>
+      </button>
+      <button class="row-handle" data-act="drag" aria-label="${i+1}쪽 순서 바꾸기">≡</button>
       <div class="meta">
         <div class="n">${i+1}쪽</div>
         <div class="d">${paper?paper.name:'자동'} · ${pg.w}×${pg.h}</div>
@@ -1170,16 +1183,87 @@ function renderHome(){
         <button class="mini" data-act="jpg" aria-label="이 쪽 JPG 공유">↗</button>
         <button class="mini del" data-act="del" aria-label="삭제">✕</button>
       </div>`;
-    row.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>pageAction(b.dataset.act,i)));
+    row.querySelectorAll('button').forEach(b=>{
+      if(b.dataset.act==='drag') b.addEventListener('pointerdown',e=>startRowDrag(e,i,row));
+      else b.addEventListener('click',()=>pageAction(b.dataset.act,i));
+    });
     box.appendChild(row);
   });
 }
+
+/* ---------------- 목록 끌어서 순서 바꾸기 ---------------- */
+let dnd=null;
+function startRowDrag(e,i,row){
+  if(state.pages.length<2) return;
+  e.preventDefault();
+  const rows=[...$('#pageList').querySelectorAll('.page-row')];
+  const h=row.getBoundingClientRect().height+10;   // 아래 여백 포함
+  dnd={i,to:i,row,rows,h,startY:e.clientY,startScroll:$('#stHome').scrollTop,moved:false};
+  row.classList.add('dragging');
+  try{ e.target.setPointerCapture(e.pointerId); }catch(err){}
+}
+function layoutDrag(){
+  dnd.rows.forEach((r,idx)=>{
+    if(idx===dnd.i) return;
+    let shift=0;
+    if(dnd.i<dnd.to && idx>dnd.i && idx<=dnd.to) shift=-dnd.h;
+    else if(dnd.i>dnd.to && idx>=dnd.to && idx<dnd.i) shift=dnd.h;
+    r.style.transform=shift?`translateY(${shift}px)`:'';
+  });
+}
+function moveRowDrag(e){
+  if(!dnd) return;
+  e.preventDefault();
+  const st=$('#stHome'), r=st.getBoundingClientRect();
+  if(e.clientY<r.top+70) st.scrollTop-=10;
+  else if(e.clientY>r.bottom-70) st.scrollTop+=10;
+  const dy=e.clientY-dnd.startY+(st.scrollTop-dnd.startScroll);
+  if(Math.abs(dy)>4) dnd.moved=true;
+  dnd.row.style.transform=`translateY(${dy}px)`;
+  const to=clamp(dnd.i+Math.round(dy/dnd.h),0,dnd.rows.length-1);
+  if(to!==dnd.to){ dnd.to=to; layoutDrag(); }
+}
+function endRowDrag(){
+  if(!dnd) return;
+  const {i,to,rows,moved}=dnd;
+  rows.forEach(r=>{ r.style.transform=''; r.classList.remove('dragging'); });
+  dnd=null;
+  if(!moved || to===i) return;
+  const P=state.pages, [pg]=P.splice(i,1);
+  P.splice(to,0,pg);
+  renderHome();
+  toast(`${i+1}쪽을 ${to+1}번째로 옮겼습니다`);
+}
+window.addEventListener('pointermove',moveRowDrag,{passive:false});
+window.addEventListener('pointerup',endRowDrag);
+window.addEventListener('pointercancel',endRowDrag);
 function pageAction(act,i){
   const P=state.pages;
   if(act==='up'&&i>0){ [P[i-1],P[i]]=[P[i],P[i-1]]; renderHome(); }
   else if(act==='down'&&i<P.length-1){ [P[i+1],P[i]]=[P[i],P[i+1]]; renderHome(); }
   else if(act==='del'){ P.splice(i,1); renderHome(); toast('문서를 삭제했습니다'); }
   else if(act==='jpg'){ sendJpg([P[i]],i+1,false); }
+  else if(act==='edit'){ reopenPage(i); }
+}
+/* 저장해 둔 '보정 전' 이미지로 다듬기 화면을 다시 엽니다 */
+async function reopenPage(i){
+  const pg=state.pages[i];
+  if(!pg.raw){ toast('이 문서는 다시 다듬을 수 없습니다'); return; }
+  busy('문서를 여는 중');
+  await nextFrame();
+  try{
+    const bmp=await createImageBitmap(pg.raw);
+    const c=newCanvas(bmp.width,bmp.height);
+    ctx2d(c).drawImage(bmp,0,0);
+    if(bmp.close) bmp.close();
+    state.work={src:c,quad:fullQuad(c),paper:pg.paper,dpi:pg.dpi,
+      params:{...(pg.params||DEFAULTS)},tuned:true,reedit:i,raw:c,rawBlob:pg.raw};
+    const s=Math.min(1,MAX_PREVIEW/Math.max(c.width,c.height));
+    const pv = s<1 ? boxDownscale(c,s) : c;
+    previewData=ctx2d(pv).getImageData(0,0,pv.width,pv.height);
+    syncChips(); syncSliders();
+    unbusy(); setView('edit');
+  }catch(e){ unbusy(); toast('문서를 열지 못했습니다'); }
 }
 
 /* ---------------- 자르기 화면 ---------------- */
@@ -1422,22 +1506,37 @@ async function goEdit(){
 }
 async function savePage(){
   const wk=state.work;
-  busy('문서를 정리하는 중');
+  busy(wk.reedit!=null?'다시 저장하는 중':'문서를 정리하는 중');
   await nextFrame();
   try{
-    const {w,h}=outSize(wk.quad,wk.paper,wk.dpi);
-    const full=warp(wk.src,wk.quad,w,h);
-    const fctx=ctx2d(full);
-    const img=fctx.getImageData(0,0,w,h);
+    let w,h,img,rawBlob;
+    if(wk.reedit!=null){
+      // 보정 전 이미지를 그대로 다시 씁니다(다시 자르거나 재인코딩하지 않습니다)
+      w=wk.raw.width; h=wk.raw.height;
+      img=ctx2d(wk.raw).getImageData(0,0,w,h);
+      rawBlob=wk.rawBlob;
+    }else{
+      ({w,h}=outSize(wk.quad,wk.paper,wk.dpi));
+      const warped=warp(wk.src,wk.quad,w,h);
+      rawBlob=await toBlob(warped,'image/jpeg',0.92);
+      img=ctx2d(warped).getImageData(0,0,w,h);
+    }
     enhance(img,wk.params);
-    fctx.putImageData(img,0,0);
+    const full=newCanvas(w,h);
+    ctx2d(full).putImageData(img,0,0);
     const blob=await toBlob(full,'image/jpeg',0.94);
-    const tw=200, th=Math.round(h*tw/w);
-    const tc=newCanvas(tw,Math.max(1,th)); ctx2d(tc).drawImage(full,0,0,tw,th);
-    state.pages.push({blob,w,h,paper:wk.paper,dpi:wk.dpi,thumb:tc.toDataURL('image/jpeg',0.7)});
+    const tw=200, th=Math.max(1,Math.round(h*tw/w));
+    const tc=newCanvas(tw,th); ctx2d(tc).drawImage(full,0,0,tw,th);
+    const page={blob,w,h,paper:wk.paper,dpi:wk.dpi,
+      thumb:tc.toDataURL('image/jpeg',0.7),raw:rawBlob,params:{...wk.params}};
+    const reedit=wk.reedit;
+    if(reedit!=null) state.pages[reedit]=page; else state.pages.push(page);
     state.work=null; previewData=null;
     renderHome(); unbusy();
-    if(state.queue.length){
+    if(reedit!=null){
+      cancelQueue(); setView('home');
+      toast(`${reedit+1}쪽을 다시 저장했습니다`);
+    }else if(state.queue.length){
       state.queueDone++;
       toast(`${state.queueDone}/${state.queueTotal}장 완료`);
       nextInQueue();
@@ -1734,7 +1833,11 @@ $('#nextBtn').addEventListener('click',()=>{
   else if(state.view==='edit') savePage();
 });
 $('#backBtn').addEventListener('click',()=>{
-  if(state.view==='edit'){ setView('crop'); return; }
+  if(state.view==='edit'){
+    if(state.work&&state.work.reedit!=null){ state.work=null; previewData=null; setView('home'); }
+    else setView('crop');
+    return;
+  }
   if(state.view==='import'){ state.imports=[]; setView('home'); return; }
   const wasQueue=state.queueTotal>1;
   state.work=null; previewData=null; cancelQueue(); setView('home');

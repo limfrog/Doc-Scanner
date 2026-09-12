@@ -25,6 +25,9 @@
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{height:100%;margin:0}
+.app,.stage,.dock,.bar,canvas,video{
+  -webkit-user-select:none;-moz-user-select:none;user-select:none;-webkit-touch-callout:none}
+canvas{touch-action:none}
 body{
   background:var(--stage);color:var(--ink);
   font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",system-ui,sans-serif;
@@ -81,6 +84,15 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 .mini{width:36px;height:36px;border-radius:9px;background:var(--paper);border:1px solid var(--line);display:grid;place-items:center;font-size:15px}
 .mini.del{color:var(--danger)}
 .mini[disabled]{opacity:.35}
+
+/* 카메라 */
+#stCam video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#0b0e14}
+.cam-tip{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);background:rgba(12,16,22,.74);color:var(--paper);padding:8px 15px;border-radius:999px;font-size:13px;white-space:nowrap;pointer-events:none}
+.flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none}
+.flash.on{animation:fl .3s ease-out}
+@keyframes fl{0%{opacity:.9}100%{opacity:0}}
+@media (prefers-reduced-motion:reduce){.flash.on{animation-duration:.05s}}
+.btn[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--paper)}
 
 /* 불러오기 */
 .imp-wrap{padding:14px 14px 6px}
@@ -163,6 +175,14 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
     <div class="home-wrap" id="pageList"></div>
   </section>
 
+  <!-- 카메라 -->
+  <section class="stage dark" id="stCam" hidden>
+    <video id="camVideo" playsinline muted autoplay></video>
+    <canvas id="camOv"></canvas>
+    <div class="flash" id="camFlash"></div>
+    <div class="cam-tip" id="camTip">문서를 화면 안에 맞춰 주세요</div>
+  </section>
+
   <!-- 불러오기 -->
   <section class="stage sheet" id="stImport" hidden>
     <div class="imp-wrap">
@@ -197,6 +217,15 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
     </p>
   </footer>
 
+  <!-- 카메라 조작판 -->
+  <footer class="dock" id="dkCam" hidden>
+    <div class="row">
+      <button class="btn" id="btnAutoToggle" aria-pressed="true">자동 촬영 켜짐</button>
+      <button class="btn main" id="btnShutter">지금 촬영</button>
+    </div>
+    <p class="hint">더 선명하게 찍으려면 <button class="link" id="btnSysCam">기기 카메라 앱</button>을 쓰세요</p>
+  </footer>
+
   <!-- 불러오기 조작판 -->
   <footer class="dock" id="dkImport" hidden>
     <div class="chips" id="impPaper"></div>
@@ -219,7 +248,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
       <button class="btn ghost" id="btnSkip" hidden>건너뛰기</button>
     </div>
     <div class="chips" id="dpiChips"></div>
-    <p class="hint">네 모서리를 끌어 문서 경계에 맞추세요</p>
+    <p class="hint">모서리를 끌면 한 점, 변 가운데 막대를 끌면 그 변 전체가 움직입니다</p>
   </footer>
 
   <!-- 보정 조작판 -->
@@ -249,7 +278,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → PNG·PDF
    ========================================================= */
 
-const BUILD='0.10';
+const BUILD='0.12';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2400;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -374,6 +403,14 @@ async function renderPdfPage(doc,num,maxSide){
 }
 async function sourceToCanvas(src,maxSide){
   if(src.kind==='pdf') return renderPdfPage(src.doc,src.pageNum,maxSide||MAX_SRC);
+  if(src.kind==='canvas'){
+    const c=src.canvas, lim=maxSide||MAX_SRC;
+    const s=Math.min(1,lim/Math.max(c.width,c.height));
+    if(s>=1) return c;
+    const o=newCanvas(Math.round(c.width*s),Math.round(c.height*s));
+    ctx2d(o).drawImage(c,0,0,o.width,o.height);
+    return o;
+  }
   return fileToCanvas(src.file);
 }
 
@@ -647,28 +684,162 @@ function unsharp(img,amount){
 /* ---------------- 화면 전환 ---------------- */
 const VIEWS={
   home:{title:'Doc Scanner',sub:'촬영하거나 저장된 사진·PDF를 불러와 문서로 정리합니다'},
+  cam:{title:'촬영',sub:'문서 네 모서리가 잡히면 자동으로 찍습니다'},
   import:{title:'불러온 항목',sub:'문서로 만들 것을 고르세요'},
-  crop:{title:'가장자리 맞추기',sub:'모서리를 끌어 문서 경계에 맞추세요'},
+  crop:{title:'가장자리 맞추기',sub:'모서리와 변 손잡이로 문서 경계에 맞추세요'},
   edit:{title:'배경과 잉크 다듬기',sub:'배경은 희게, 글자는 진하게 조절합니다'},
 };
 function setView(v){
+  if(v!=='cam') stopCam();
   state.view=v;
   const info=VIEWS[v];
   $('#vTitle').textContent=info.title;
   $('#vSub').textContent = (state.queueTotal>1 && (v==='crop'||v==='edit'))
     ? `${state.queueDone+1}/${state.queueTotal}장째 · ${info.sub}` : info.sub;
   $('#stHome').hidden=v!=='home'; $('#dkHome').hidden=v!=='home';
+  $('#stCam').hidden=v!=='cam'; $('#dkCam').hidden=v!=='cam';
   $('#stImport').hidden=v!=='import'; $('#dkImport').hidden=v!=='import';
   $('#stCrop').hidden=v!=='crop'; $('#dkCrop').hidden=v!=='crop';
   $('#stEdit').hidden=v!=='edit'; $('#dkEdit').hidden=v!=='edit';
   $('#backBtn').hidden=v==='home';
   $('#btnSkip').hidden=!(state.queueTotal>1);
   const nb=$('#nextBtn');
-  nb.hidden=(v==='home'||v==='import');
+  nb.hidden=(v==='home'||v==='import'||v==='cam');
   nb.textContent=v==='crop'?'다음':'저장';
   if(v==='import') renderImport();
   if(v==='crop') requestAnimationFrame(drawCrop);
   if(v==='edit') requestAnimationFrame(renderEdit);
+}
+
+/* ---------------- 실시간 촬영 (자동 셔터) ---------------- */
+const cam={
+  stream:null, raf:0, lastRun:0, quad:null, stableMs:0, lastSeen:0,
+  auto:true, busy:false,
+};
+const AUTO_HOLD=800;        // 이 시간만큼 흔들림 없이 잡히면 촬영
+const DET_LONG=320;         // 감지용 축소 프레임 긴 변
+let detCv=null;
+
+async function startCam(){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    $('#camIn').click(); return;
+  }
+  busy('카메라를 켜는 중'); await nextFrame();
+  try{
+    cam.stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:'environment'},width:{ideal:2560},height:{ideal:1920}},
+      audio:false});
+  }catch(e){
+    unbusy();
+    toast(e&&e.name==='NotAllowedError'?'카메라 권한이 필요합니다':'카메라를 열 수 없습니다');
+    $('#camIn').click(); return;
+  }
+  const v=$('#camVideo');
+  v.srcObject=cam.stream;
+  try{ await v.play(); }catch(e){}
+  cam.quad=null; cam.stableMs=0; cam.lastSeen=0; cam.busy=false;
+  unbusy(); setView('cam');
+  cam.lastRun=0;
+  cancelAnimationFrame(cam.raf);
+  cam.raf=requestAnimationFrame(camLoop);
+}
+function stopCam(){
+  cancelAnimationFrame(cam.raf); cam.raf=0;
+  if(cam.stream){ cam.stream.getTracks().forEach(t=>t.stop()); cam.stream=null; }
+  const v=$('#camVideo'); if(v) v.srcObject=null;
+}
+function videoFit(){
+  const v=$('#camVideo'), r=v.getBoundingClientRect();
+  const vw=v.videoWidth||1, vh=v.videoHeight||1;
+  const s=Math.min(r.width/vw,r.height/vh);
+  return {s,ox:(r.width-vw*s)/2,oy:(r.height-vh*s)/2,w:r.width,h:r.height};
+}
+function camLoop(ts){
+  if(state.view!=='cam'){ return; }
+  const v=$('#camVideo');
+  if(v.videoWidth&&!cam.busy&&ts-cam.lastRun>120){
+    cam.lastRun=ts;
+    detectFrame(v,ts);
+  }
+  drawCamOverlay();
+  cam.raf=requestAnimationFrame(camLoop);
+}
+function detectFrame(v,ts){
+  const s=DET_LONG/Math.max(v.videoWidth,v.videoHeight);
+  const w=Math.max(8,Math.round(v.videoWidth*s)), h=Math.max(8,Math.round(v.videoHeight*s));
+  if(!detCv||detCv.width!==w||detCv.height!==h) detCv=newCanvas(w,h);
+  ctx2d(detCv).drawImage(v,0,0,w,h);
+  const found=autoDetect(detCv);
+  const ok=found&&isDocQuad(found,w,h);
+  if(!ok){ cam.quad=null; cam.stableMs=0; return; }
+  const k=v.videoWidth/w;
+  const q=found.map(p=>({x:p.x*k,y:p.y*k}));
+  const moved=cam.quad?maxCornerShift(cam.quad,q)/Math.max(v.videoWidth,v.videoHeight):1;
+  const dt=cam.lastSeen?ts-cam.lastSeen:0;
+  cam.lastSeen=ts;
+  cam.stableMs = moved<0.02 ? cam.stableMs+dt : 0;
+  cam.quad=q;
+  if(cam.auto&&cam.stableMs>=AUTO_HOLD) shoot();
+}
+function maxCornerShift(a,b){
+  let m=0;
+  for(let i=0;i<4;i++) m=Math.max(m,Math.hypot(a[i].x-b[i].x,a[i].y-b[i].y));
+  return m;
+}
+function isDocQuad(q,w,h){
+  const area=quadArea(q);
+  if(area<w*h*0.16||area>w*h*0.985) return false;
+  const len=i=>Math.hypot(q[(i+1)%4].x-q[i].x,q[(i+1)%4].y-q[i].y);
+  const L=[len(0),len(1),len(2),len(3)];
+  if(Math.min(...L)<Math.min(w,h)*0.25) return false;
+  if(Math.max(L[0],L[2])/Math.max(1,Math.min(L[0],L[2]))>1.7) return false;
+  if(Math.max(L[1],L[3])/Math.max(1,Math.min(L[1],L[3]))>1.7) return false;
+  let sign=0;
+  for(let i=0;i<4;i++){
+    const p=q[i], c=q[(i+1)%4], n=q[(i+2)%4];
+    const cr=(c.x-p.x)*(n.y-c.y)-(c.y-p.y)*(n.x-c.x);
+    if(sign===0) sign=Math.sign(cr);
+    else if(Math.sign(cr)!==sign) return false;   // 볼록하지 않음
+    const a1=Math.hypot(c.x-p.x,c.y-p.y), a2=Math.hypot(n.x-c.x,n.y-c.y);
+    const dot=((p.x-c.x)*(n.x-c.x)+(p.y-c.y)*(n.y-c.y))/Math.max(1,a1*a2);
+    const ang=Math.acos(clamp(dot,-1,1))*180/Math.PI;
+    if(ang<55||ang>125) return false;             // 직사각형에서 너무 벗어남
+  }
+  return true;
+}
+function drawCamOverlay(){
+  const ov=$('#camOv');
+  const {ctx,w,h}=sizeCanvas(ov);
+  ctx.clearRect(0,0,w,h);
+  const tip=$('#camTip');
+  if(!cam.quad){
+    tip.textContent='문서를 화면 안에 맞춰 주세요';
+    return;
+  }
+  const f=videoFit();
+  const p=cam.quad.map(q=>({x:q.x*f.s+f.ox,y:q.y*f.s+f.oy}));
+  const t=cam.auto?clamp(cam.stableMs/AUTO_HOLD,0,1):0;
+  ctx.beginPath(); ctx.moveTo(p[0].x,p[0].y);
+  for(let i=1;i<4;i++) ctx.lineTo(p[i].x,p[i].y);
+  ctx.closePath();
+  ctx.fillStyle=`rgba(245,165,36,${0.08+0.22*t})`; ctx.fill();
+  ctx.lineWidth=2+2*t; ctx.strokeStyle=t>0.99?'#fff':'#f5a524'; ctx.stroke();
+  p.forEach(q=>{ ctx.beginPath(); ctx.arc(q.x,q.y,5+3*t,0,Math.PI*2); ctx.fillStyle='#f5a524'; ctx.fill(); });
+  tip.textContent = cam.auto ? (t>0.55?'고정하세요, 곧 촬영합니다':'문서를 찾았습니다') : '지금 촬영을 누르세요';
+}
+async function shoot(){
+  if(cam.busy) return;
+  cam.busy=true;
+  const v=$('#camVideo');
+  if(!v.videoWidth){ cam.busy=false; return; }
+  const c=newCanvas(v.videoWidth,v.videoHeight);
+  ctx2d(c).drawImage(v,0,0);
+  const fl=$('#camFlash');
+  fl.classList.remove('on'); void fl.offsetWidth; fl.classList.add('on');
+  stopCam();
+  cancelQueue();
+  await startWith({kind:'canvas',canvas:c,name:'촬영'});
+  cam.busy=false;
 }
 
 /* ---------------- 불러오기 화면 ---------------- */
@@ -852,13 +1023,53 @@ function pageAction(act,i){
 /* ---------------- 자르기 화면 ---------------- */
 const cropCv=$('#cropCv');
 let cropFit={scale:1,ox:0,oy:0};
-let drag={active:false,idx:-1,px:0,py:0};
+let drag={active:false,type:'corner',idx:-1,start:null,quad0:null};
+
+function edgeMid(q,i){
+  const a=q[i], b=q[(i+1)%4];
+  return {x:(a.x+b.x)/2,y:(a.y+b.y)/2};
+}
+function lineCross(p,d,q,e){
+  const den=d.x*e.y-d.y*e.x;
+  if(Math.abs(den)<1e-9) return null;
+  const t=((q.x-p.x)*e.y-(q.y-p.y)*e.x)/den;
+  return {x:p.x+d.x*t,y:p.y+d.y*t};
+}
+function isConvexQuad(q){
+  let sign=0;
+  for(let i=0;i<4;i++){
+    const p=q[i], c=q[(i+1)%4], n=q[(i+2)%4];
+    const cr=(c.x-p.x)*(n.y-c.y)-(c.y-p.y)*(n.x-c.x);
+    if(Math.abs(cr)<1e-6) return false;
+    if(sign===0) sign=Math.sign(cr);
+    else if(Math.sign(cr)!==sign) return false;
+  }
+  return true;
+}
+/* 변 전체를 평행 이동: 이웃한 두 변의 연장선과 만나는 점을 새 모서리로 삼습니다 */
+function moveEdge(q0,i,off,w,h){
+  const a=q0[i], b=q0[(i+1)%4], prev=q0[(i+3)%4], next=q0[(i+2)%4];
+  const d={x:b.x-a.x,y:b.y-a.y};
+  const L=Math.hypot(d.x,d.y)||1;
+  const n={x:-d.y/L,y:d.x/L};
+  const A={x:a.x+n.x*off,y:a.y+n.y*off};
+  const B={x:b.x+n.x*off,y:b.y+n.y*off};
+  const na=lineCross(A,d,prev,{x:a.x-prev.x,y:a.y-prev.y})||A;
+  const nb=lineCross(A,d,next,{x:b.x-next.x,y:b.y-next.y})||B;
+  const out=q0.slice();
+  out[i]=na; out[(i+1)%4]=nb;
+  const inside=p=>p.x>=-0.5&&p.y>=-0.5&&p.x<=w+0.5&&p.y<=h+0.5;
+  if(!inside(na)||!inside(nb)) return null;
+  if(!isConvexQuad(out)) return null;
+  if(quadArea(out)<w*h*0.02) return null;
+  return out;
+}
 
 function sizeCanvas(cv){
   const dpr=Math.min(2.5,window.devicePixelRatio||1);
   const r=cv.parentElement.getBoundingClientRect();
-  cv.width=Math.max(1,Math.round(r.width*dpr));
-  cv.height=Math.max(1,Math.round(r.height*dpr));
+  const W=Math.max(1,Math.round(r.width*dpr)), H=Math.max(1,Math.round(r.height*dpr));
+  if(cv.width!==W||cv.height!==H){ cv.width=W; cv.height=H; }
   const c=cv.getContext('2d');
   c.setTransform(dpr,0,0,dpr,0,0);
   return {ctx:c,w:r.width,h:r.height};
@@ -886,14 +1097,37 @@ function drawCrop(){
   for(let i=1;i<4;i++) ctx.lineTo(pts[i].x,pts[i].y);
   ctx.closePath();
   ctx.lineWidth=2; ctx.strokeStyle='#f5a524'; ctx.stroke();
+  // 변 손잡이
+  for(let i=0;i<4;i++){
+    const a=pts[i], b=pts[(i+1)%4];
+    const m={x:(a.x+b.x)/2,y:(a.y+b.y)/2};
+    const on=drag.active&&drag.type==='edge'&&drag.idx===i;
+    const ang=Math.atan2(b.y-a.y,b.x-a.x);
+    const half=Math.min(20,Math.hypot(b.x-a.x,b.y-a.y)/3), th=on?7:5.5;
+    ctx.save();
+    ctx.translate(m.x,m.y); ctx.rotate(ang);
+    ctx.beginPath();
+    ctx.moveTo(-half+th,-th);
+    ctx.lineTo(half-th,-th);
+    ctx.arc(half-th,0,th,-Math.PI/2,Math.PI/2);
+    ctx.lineTo(-half+th,th);
+    ctx.arc(-half+th,0,th,Math.PI/2,-Math.PI/2);
+    ctx.closePath();
+    ctx.fillStyle=on?'#f5a524':'rgba(245,165,36,.35)'; ctx.fill();
+    ctx.lineWidth=2; ctx.strokeStyle='#fff'; ctx.stroke();
+    ctx.restore();
+  }
   // 모서리 손잡이
   pts.forEach((p,i)=>{
-    const on=drag.active&&drag.idx===i;
+    const on=drag.active&&drag.type==='corner'&&drag.idx===i;
     ctx.beginPath(); ctx.arc(p.x,p.y,on?15:12,0,Math.PI*2);
     ctx.fillStyle=on?'#f5a524':'rgba(245,165,36,.22)'; ctx.fill();
     ctx.lineWidth=2.5; ctx.strokeStyle='#fff'; ctx.stroke();
   });
-  if(drag.active) drawLoupe(ctx,w,h,wk.quad[drag.idx]);
+  if(drag.active){
+    const target = drag.type==='corner' ? wk.quad[drag.idx] : edgeMid(wk.quad,drag.idx);
+    drawLoupe(ctx,w,h,target);
+  }
 }
 function drawLoupe(ctx,w,h,pt){
   const R=58, zoom=3, s=cropFit.scale;
@@ -915,21 +1149,42 @@ const toStage=p=>({x:p.x*cropFit.scale+cropFit.ox, y:p.y*cropFit.scale+cropFit.o
 const toSrc=(x,y)=>({x:(x-cropFit.ox)/cropFit.scale, y:(y-cropFit.oy)/cropFit.scale});
 
 cropCv.addEventListener('pointerdown',e=>{
+  e.preventDefault();
   const wk=state.work; if(!wk) return;
   const r=cropCv.getBoundingClientRect(), x=e.clientX-r.left, y=e.clientY-r.top;
   let best=-1,bd=1e9;
   wk.quad.forEach((p,i)=>{const q=toStage(p),d=Math.hypot(q.x-x,q.y-y); if(d<bd){bd=d;best=i;}});
-  if(bd>46) return;
-  drag={active:true,idx:best,px:x,py:y};
+  let type='corner', idx=best, hit=bd<=46;
+  if(!hit){
+    let eb=-1,ed=1e9;
+    for(let i=0;i<4;i++){
+      const m=toStage(edgeMid(wk.quad,i));
+      const d=Math.hypot(m.x-x,m.y-y);
+      if(d<ed){ed=d;eb=i;}
+    }
+    if(ed<=40){ type='edge'; idx=eb; hit=true; }
+  }
+  if(!hit) return;
+  drag={active:true,type,idx,start:toSrc(x,y),quad0:wk.quad.map(p=>({x:p.x,y:p.y}))};
   cropCv.setPointerCapture(e.pointerId);
-  e.preventDefault(); drawCrop();
+  drawCrop();
 });
 cropCv.addEventListener('pointermove',e=>{
   if(!drag.active) return;
   const r=cropCv.getBoundingClientRect();
   const s=toSrc(e.clientX-r.left, e.clientY-r.top);
   const wk=state.work;
-  wk.quad[drag.idx]={x:clamp(s.x,0,wk.src.width),y:clamp(s.y,0,wk.src.height)};
+  if(drag.type==='corner'){
+    wk.quad[drag.idx]={x:clamp(s.x,0,wk.src.width),y:clamp(s.y,0,wk.src.height)};
+  }else{
+    const q0=drag.quad0, i=drag.idx;
+    const a=q0[i], b=q0[(i+1)%4];
+    const d={x:b.x-a.x,y:b.y-a.y}, L=Math.hypot(d.x,d.y)||1;
+    const n={x:-d.y/L,y:d.x/L};
+    const off=(s.x-drag.start.x)*n.x+(s.y-drag.start.y)*n.y;
+    const moved=moveEdge(q0,i,off,wk.src.width,wk.src.height);
+    if(moved) wk.quad=moved;
+  }
   e.preventDefault(); drawCrop();
 });
 const endDrag=()=>{ if(drag.active){drag.active=false;drawCrop();} };
@@ -1233,7 +1488,14 @@ $('#btnReset').addEventListener('click',()=>{
 });
 
 /* ---------------- 버튼 ---------------- */
-$('#btnShoot').addEventListener('click',()=>$('#camIn').click());
+$('#btnShoot').addEventListener('click',()=>{ cancelQueue(); startCam(); });
+$('#btnShutter').addEventListener('click',shoot);
+$('#btnAutoToggle').addEventListener('click',e=>{
+  cam.auto=!cam.auto; cam.stableMs=0;
+  e.currentTarget.setAttribute('aria-pressed',String(cam.auto));
+  e.currentTarget.textContent=cam.auto?'자동 촬영 켜짐':'자동 촬영 꺼짐';
+});
+$('#btnSysCam').addEventListener('click',()=>{ stopCam(); setView('home'); $('#camIn').click(); });
 $('#btnPick').addEventListener('click',()=>$('#fileIn').click());
 $('#camIn').addEventListener('change',e=>{
   const f=e.target.files&&e.target.files[0]; e.target.value='';
@@ -1327,6 +1589,12 @@ window.addEventListener('orientationchange',()=>setTimeout(()=>{
   if(state.view==='edit') renderEdit();
 },250));
 document.addEventListener('gesturestart',e=>e.preventDefault());
+document.addEventListener('selectstart',e=>{ if(drag.active) e.preventDefault(); });
+document.addEventListener('contextmenu',e=>{
+  if(e.target&&e.target.tagName==='CANVAS') e.preventDefault();
+});
+document.addEventListener('visibilitychange',()=>{ if(document.hidden) stopCam(); });
+window.addEventListener('pagehide',stopCam);
 
 $('#buildTag').textContent='v'+BUILD;
 document.title='Doc Scanner v'+BUILD;

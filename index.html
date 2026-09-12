@@ -240,6 +240,9 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
 
   <!-- 불러오기 조작판 -->
   <footer class="dock" id="dkImport" hidden>
+    <div class="row" style="margin-bottom:9px">
+      <button class="btn" id="btnAutoMode" aria-pressed="true">각 장 자동 분석 켜짐</button>
+    </div>
     <div class="chips" id="impPaper"></div>
     <div class="chips" id="impDpi"></div>
     <div class="chips" id="impMode"></div>
@@ -247,7 +250,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
       <button class="btn main" id="btnBatch">한 번에 정리</button>
       <button class="btn" id="btnOneByOne">한 장씩 다듬기</button>
     </div>
-    <p class="hint">한 번에 정리하면 사진은 가장자리를 자동으로 찾고, PDF는 쪽 전체를 위 설정으로 저장합니다</p>
+    <p class="hint">자동 분석을 켜면 장마다 문서 상태를 보고 모드와 슬라이더를 정합니다</p>
   </footer>
 
   <!-- 자르기 조작판 -->
@@ -269,9 +272,10 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
     <div class="field"><label for="sBright">밝기</label><input type="range" id="sBright" min="-60" max="60" value="0"><output id="oBright">0</output></div>
     <div class="field"><label for="sContrast">대비</label><input type="range" id="sContrast" min="-60" max="80" value="10"><output id="oContrast">10</output></div>
     <div class="field"><label for="sInk">잉크 농도</label><input type="range" id="sInk" min="0" max="100" value="45"><output id="oInk">45</output></div>
-    <div class="row" style="align-items:center;gap:14px">
-      <label class="switch"><input type="checkbox" id="cSharp" checked> 글자 선명하게</label>
-      <button class="btn ghost" id="btnReset" style="flex:0 0 auto;padding:10px 14px">초기화</button>
+    <div class="row" style="align-items:center;gap:10px">
+      <label class="switch" style="flex:1"><input type="checkbox" id="cSharp" checked> 글자 선명하게</label>
+      <button class="btn ghost" id="btnAutoTune" style="flex:0 0 auto;padding:10px 12px">자동 추천</button>
+      <button class="btn ghost" id="btnReset" style="flex:0 0 auto;padding:10px 12px">초기화</button>
     </div>
   </footer>
 </div>
@@ -290,7 +294,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.16';
+const BUILD='0.17';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2800;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -322,7 +326,7 @@ const state = {
   imports:[],                // 불러오기 화면 목록 {file,name,thumb,ok,selected}
   queue:[],                  // 한 장씩 다듬기 대기열(File)
   queueDone:0, queueTotal:0,
-  opts:{paper:'auto',dpi:200,params:{...DEFAULTS}}, // 마지막으로 쓴 설정
+  opts:{paper:'auto',dpi:200,autoTune:true,params:{...DEFAULTS}}, // 마지막으로 쓴 설정
 };
 const BLANK='data:image/gif;base64,R0lGODlhAQABAIAAAO7u7v///yH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==';
 const MAX_IMPORT=40;
@@ -761,6 +765,78 @@ function unsharp(img,amount){
   }
 }
 
+/* ---------------- 문서 상태 분석 → 권장 초기값 ---------------- */
+function otsuFromHist(hist,total){
+  let sum=0; for(let i=0;i<256;i++) sum+=i*hist[i];
+  let sumB=0,wB=0,best=-1,thr=128;
+  for(let i=0;i<256;i++){
+    wB+=hist[i]; if(!wB) continue;
+    const wF=total-wB; if(!wF) break;
+    sumB+=i*hist[i];
+    const mB=sumB/wB, mF=(sum-sumB)/wF, v=wB*wF*(mB-mF)*(mB-mF);
+    if(v>best){best=v;thr=i;}
+  }
+  return thr;
+}
+function analyzeDoc(srcImg){
+  const d=srcImg.data;
+  // 1) 채도: 컬러 문서인지 판단
+  let satHigh=0,n=0;
+  for(let i=0;i<d.length;i+=16){
+    const r=d[i],g=d[i+1],b=d[i+2];
+    const mx=Math.max(r,g,b), mn=Math.min(r,g,b);
+    if(mx-mn>45&&mx>60) satHigh++;
+    n++;
+  }
+  const satFrac=n?satHigh/n:0;
+
+  // 2) 조명을 지운 회색 이미지로 분포 파악
+  const g=new ImageData(new Uint8ClampedArray(d),srcImg.width,srcImg.height);
+  enhance(g,{mode:'gray',bright:0,contrast:0,ink:0,sharpen:false});
+  const G=g.data, hist=new Uint32Array(256);
+  let total=0;
+  for(let i=0;i<G.length;i+=4){ hist[G[i]]++; total++; }
+  const t=Math.max(8,otsuFromHist(hist,total));
+  let inkCount=0; for(let i=0;i<t;i++) inkCount+=hist[i];
+  const coverage=inkCount/total;
+  if(coverage<0.004) return {...DEFAULTS};        // 거의 빈 종이 → 기본값
+
+  let whiteFrac=0, midBand=0;
+  for(let i=244;i<256;i++) whiteFrac+=hist[i];
+  for(let i=80;i<221;i++) midBand+=hist[i];
+  whiteFrac/=total; midBand/=total;               // 흰 바탕 비율 / 중간톤 비율
+
+  const inkPct=p=>{
+    let acc=0, target=inkCount*p;
+    for(let i=0;i<t;i++){ acc+=hist[i]; if(acc>=target) return i; }
+    return t;
+  };
+  const inkMed=inkPct(0.5);                       // 잉크의 대표 농도(낮을수록 진함)
+
+  let mode;
+  if(satFrac>0.06) mode='color';                  // 색이 실린 문서
+  else if(whiteFrac<0.45||midBand>0.20) mode='gray'; // 흰 종이 바탕이 아님(사진·음영 문서)
+  else if(inkMed>110) mode='line';                // 연하거나 가는 획 위주(악보·연필)
+  else mode='bw';                                 // 진한 글자 위주
+
+  const q = mode==='line' ? inkPct(0.12) : inkPct(0.30);
+  let ink=clamp(Math.round(q/(0.62*255)*100),5,95);
+  let contrast=clamp(Math.round(inkMed/255*70-10),0,55);
+  let bright=coverage>0.35?8:0;
+  if(mode==='color'){ ink=Math.min(ink,35); contrast=Math.min(contrast,25); }
+  return {mode,ink,contrast,bright,sharpen:true};
+}
+function applyRecommendation(img,why){
+  if(!state.work) return;
+  const rec=analyzeDoc(img);
+  Object.assign(state.work.params,rec);
+  Object.assign(state.opts.params,rec);
+  state.work.tuned=true;
+  syncChips(); syncSliders(); queueRender();
+  const name=(MODES.find(m=>m.id===rec.mode)||{}).name||rec.mode;
+  if(why) toast(`문서에 맞춰 ${name}으로 맞췄습니다`);
+}
+
 /* ---------------- 화면 전환 ---------------- */
 const VIEWS={
   home:{title:'Doc Scanner',sub:'촬영하거나 저장된 사진·PDF를 불러와 문서로 정리합니다'},
@@ -1016,7 +1092,13 @@ async function processSource(src){
   const full=warp(cv,quad,w,h);
   const fctx=ctx2d(full);
   const img=fctx.getImageData(0,0,w,h);
-  enhance(img,o.params);
+  let params=o.params;
+  if(o.autoTune){
+    const k=Math.min(1,800/Math.max(w,h));
+    const small=k<1?boxDownscale(full,k):full;
+    params=analyzeDoc(ctx2d(small).getImageData(0,0,small.width,small.height));
+  }
+  enhance(img,params);
   fctx.putImageData(img,0,0);
   const blob=await toBlob(full,'image/jpeg',0.94);
   const tw=200, th=Math.max(1,Math.round(h*tw/w));
@@ -1335,6 +1417,7 @@ async function goEdit(){
   const pw=Math.max(40,Math.round(w*s)), ph=Math.max(40,Math.round(h*s));
   const pv=warp(wk.src,wk.quad,pw,ph);
   previewData=ctx2d(pv).getImageData(0,0,pw,ph);
+  if(state.opts.autoTune && !wk.tuned) applyRecommendation(previewData,true);
   unbusy(); setView('edit');
 }
 async function savePage(){
@@ -1574,6 +1657,15 @@ $('#cSharp').addEventListener('change',e=>{
   state.opts.params.sharpen=e.target.checked;
   if(state.work){state.work.params.sharpen=e.target.checked;queueRender();}
 });
+$('#btnAutoTune').addEventListener('click',()=>{
+  if(previewData) applyRecommendation(previewData,true);
+});
+$('#btnAutoMode').addEventListener('click',e=>{
+  state.opts.autoTune=!state.opts.autoTune;
+  e.currentTarget.setAttribute('aria-pressed',String(state.opts.autoTune));
+  e.currentTarget.textContent=state.opts.autoTune?'각 장 자동 분석 켜짐':'각 장 자동 분석 꺼짐';
+  $('#impMode').style.opacity=state.opts.autoTune?'.45':'1';
+});
 $('#btnReset').addEventListener('click',()=>{
   state.opts.params={...DEFAULTS};
   if(state.work) state.work.params={...DEFAULTS};
@@ -1691,6 +1783,7 @@ $('#btnLater').addEventListener('click',()=>{ $('#updateBar').hidden=true; });
 document.addEventListener('visibilitychange',()=>{ if(document.hidden) stopCam(); });
 window.addEventListener('pagehide',stopCam);
 
+$('#impMode').style.opacity=state.opts.autoTune?'.45':'1';
 $('#buildTag').textContent='v'+BUILD;
 document.title='Doc Scanner v'+BUILD;
 renderHome();

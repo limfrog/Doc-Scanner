@@ -208,12 +208,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
     </div>
     <div class="row">
       <button class="btn" id="btnPdf" disabled>PDF 공유</button>
-      <button class="btn" id="btnPng" disabled>PNG 공유</button>
+      <button class="btn" id="btnJpg" disabled>JPG 공유</button>
     </div>
     <p class="hint" id="homeHint">기기 카메라로 찍으면 가장 선명하게 저장됩니다</p>
     <p class="hint" id="saveLine" hidden>기기에 바로 저장
       <button class="link" id="btnPdfSave" disabled>PDF</button>
-      <button class="link" id="btnPngSave" disabled>PNG</button>
+      <button class="link" id="btnJpgSave" disabled>JPG</button>
     </p>
   </footer>
 
@@ -275,10 +275,10 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
 "use strict";
 /* =========================================================
    문서 스캐너 — 단일 파일 웹앱
-   촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → PNG·PDF
+   촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.12';
+const BUILD='0.14';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2400;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -981,9 +981,9 @@ function renderHome(){
   const n=state.pages.length;
   invalidateExports();
   schedulePrewarm();
-  ['#btnPdf','#btnPng','#btnPdfSave','#btnPngSave'].forEach(s=>$(s).disabled=!n);
+  ['#btnPdf','#btnJpg','#btnPdfSave','#btnJpgSave'].forEach(s=>$(s).disabled=!n);
   $('#homeHint').textContent = n
-    ? (SHARE_OK ? `${n}장을 한 파일의 PDF로 묶어 다른 앱으로 보냅니다` : `${n}장을 한 파일의 PDF로 묶어 저장합니다`)
+    ? (SHARE_OK ? '보낼 앱이 목록에 없으면 다른 형식으로 시도해 보세요' : `${n}장을 한 파일의 PDF로 묶어 저장합니다`)
     : '기기 카메라로 찍으면 가장 선명하게 저장됩니다';
   if(!n){
     box.innerHTML=`<div class="empty"><div class="mark"></div>
@@ -1005,7 +1005,7 @@ function renderHome(){
       <div class="acts">
         <button class="mini" data-act="up" ${i===0?'disabled':''} aria-label="위로">↑</button>
         <button class="mini" data-act="down" ${i===n-1?'disabled':''} aria-label="아래로">↓</button>
-        <button class="mini" data-act="png" aria-label="이 쪽 PNG 공유">↗</button>
+        <button class="mini" data-act="jpg" aria-label="이 쪽 JPG 공유">↗</button>
         <button class="mini del" data-act="del" aria-label="삭제">✕</button>
       </div>`;
     row.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>pageAction(b.dataset.act,i)));
@@ -1017,7 +1017,7 @@ function pageAction(act,i){
   if(act==='up'&&i>0){ [P[i-1],P[i]]=[P[i],P[i-1]]; renderHome(); }
   else if(act==='down'&&i<P.length-1){ [P[i+1],P[i]]=[P[i],P[i+1]]; renderHome(); }
   else if(act==='del'){ P.splice(i,1); renderHome(); toast('문서를 삭제했습니다'); }
-  else if(act==='png'){ sendPng([P[i]],i+1); }
+  else if(act==='jpg'){ sendJpg([P[i]],i+1,false); }
 }
 
 /* ---------------- 자르기 화면 ---------------- */
@@ -1339,7 +1339,7 @@ try{
   SHARE_OK=!!(navigator.share && navigator.canShare && navigator.canShare({files:[probe]}));
 }catch(e){ SHARE_OK=false; }
 
-let pagesVer=0, exportCache={ver:-1,pdf:null,pngs:null}, prewarmT=null;
+let pagesVer=0, exportCache={ver:-1,pdf:null}, prewarmT=null;
 function invalidateExports(){ pagesVer++; }
 function schedulePrewarm(){
   clearTimeout(prewarmT);
@@ -1352,26 +1352,13 @@ async function prewarm(){
   try{
     const pdf=await buildPdf(state.pages);
     if(v!==pagesVer) return;
-    const pngs=[];
-    for(const pg of state.pages){
-      const b=await pageToPng(pg);
-      if(v!==pagesVer) return;
-      pngs.push(b);
-    }
-    exportCache={ver:v,pdf,pngs};
+    exportCache={ver:v,pdf};
   }catch(e){ /* 준비 실패해도 누를 때 다시 만듭니다 */ }
 }
-async function pageToPng(pg){
-  const bmp=await createImageBitmap(pg.blob);
-  const c=newCanvas(bmp.width,bmp.height);
-  ctx2d(c).drawImage(bmp,0,0);
-  if(bmp.close) bmp.close();
-  return await toBlob(c,'image/png');
-}
-async function deliver(files,title,forceSave){
+async function deliver(files,forceSave){
   if(!forceSave && SHARE_OK && navigator.canShare && navigator.canShare({files})){
     try{
-      await navigator.share({files,title});
+      await navigator.share({files});   // 받는 앱 목록을 넓히려고 제목·본문 없이 파일만 넘깁니다
       return;
     }catch(e){
       if(e && (e.name==='AbortError'||e.name==='CanceledError')) return; // 사용자가 닫음
@@ -1384,6 +1371,15 @@ async function deliver(files,title,forceSave){
   }
   toast(files.length>1?`${files.length}개 파일을 저장했습니다`:'기기에 저장했습니다');
 }
+async function sendJpg(pages,label,forceSave){
+  if(!pages.length) return;
+  const t=stamp();
+  const files=pages.map((pg,i)=>{
+    const num = label!=null ? label : i+1;
+    return new File([pg.blob],`scan_${t}_${String(num).padStart(2,'0')}.jpg`,{type:'image/jpeg'});
+  });
+  await deliver(files,forceSave);
+}
 async function sendPdf(forceSave){
   if(!state.pages.length) return;
   let blob = exportCache.ver===pagesVer ? exportCache.pdf : null;
@@ -1394,32 +1390,8 @@ async function sendPdf(forceSave){
     unbusy();
   }
   const file=new File([blob],`scan_${stamp()}.pdf`,{type:'application/pdf'});
-  await deliver([file],`스캔 문서 ${state.pages.length}장`,forceSave);
+  await deliver([file],forceSave);
 }
-async function sendPng(pages,label,forceSave){
-  if(!pages.length) return;
-  const all = pages===state.pages;
-  let blobs = (all && exportCache.ver===pagesVer) ? exportCache.pngs : null;
-  if(!blobs){
-    busy('PNG로 변환하는 중'); await nextFrame();
-    try{
-      blobs=[];
-      for(let i=0;i<pages.length;i++){
-        $('#busyMsg').textContent=pages.length>1?`PNG로 변환하는 중 ${i+1}/${pages.length}`:'PNG로 변환하는 중';
-        await nextFrame();
-        blobs.push(await pageToPng(pages[i]));
-      }
-    }catch(e){ unbusy(); toast('PNG를 만들지 못했습니다'); return; }
-    unbusy();
-  }
-  const t=stamp();
-  const files=blobs.map((b,i)=>{
-    const num = label!=null ? label : i+1;
-    return new File([b],`scan_${t}_${String(num).padStart(2,'0')}.png`,{type:'image/png'});
-  });
-  await deliver(files,files.length>1?`스캔 문서 ${files.length}장`:'스캔 문서',forceSave);
-}
-
 /* ---------------- 칩·슬라이더 ---------------- */
 function buildChips(host,items,getKey,onPick){
   host.innerHTML='';
@@ -1519,11 +1491,11 @@ $('#btnSkip').addEventListener('click',()=>{
   nextInQueue();
 });
 $('#btnPdf').addEventListener('click',()=>sendPdf(false));
-$('#btnPng').addEventListener('click',()=>sendPng(state.pages,null,false));
+$('#btnJpg').addEventListener('click',()=>sendJpg(state.pages,null,false));
 $('#btnPdfSave').addEventListener('click',()=>sendPdf(true));
-$('#btnPngSave').addEventListener('click',()=>sendPng(state.pages,null,true));
+$('#btnJpgSave').addEventListener('click',()=>sendJpg(state.pages,null,true));
 if(SHARE_OK){ $('#saveLine').hidden=false; }
-else{ $('#btnPdf').textContent='PDF로 저장'; $('#btnPng').textContent='PNG로 저장'; }
+else{ $('#btnPdf').textContent='PDF 저장'; $('#btnJpg').textContent='JPG 저장'; }
 $('#btnAuto').addEventListener('click',()=>{
   const wk=state.work; if(!wk) return;
   const q=autoDetect(wk.src);

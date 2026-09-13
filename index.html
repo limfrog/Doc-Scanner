@@ -212,7 +212,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
   <section class="stage dark" id="stCam" hidden>
     <video id="camVideo" playsinline muted autoplay></video>
     <canvas id="camOv"></canvas>
-    <button class="cam-btn" id="btnTorch" aria-pressed="false" aria-label="플래시">⚡</button>
+    <button class="cam-btn" id="btnTorch" aria-pressed="false" aria-label="조명 켜기/끄기">⚡</button>
     <div class="flash" id="camFlash"></div>
     <div class="cam-tip" id="camTip">문서를 화면 안에 맞춰 주세요</div>
   </section>
@@ -327,7 +327,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.21';
+const BUILD='0.22';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2800;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -903,7 +903,7 @@ function setView(v){
 /* ---------------- 실시간 촬영 (자동 셔터) ---------------- */
 const cam={
   stream:null, raf:0, lastRun:0, quad:null, stableMs:0, lastSeen:0,
-  auto:true, busy:false, torch:false, torchOK:false,
+  auto:true, busy:false, torch:false, torchOK:false, torchWanted:false,
 };
 const AUTO_HOLD=800;        // 이 시간만큼 흔들림 없이 잡히면 촬영
 const DET_LONG=320;         // 감지용 축소 프레임 긴 변
@@ -934,6 +934,12 @@ async function startCam(){
   const tb=$('#btnTorch');
   tb.setAttribute('aria-pressed','false');
   tb.classList.toggle('off',!cam.torchOK);
+  if(cam.torchOK&&cam.torchWanted){          // 이전에 켜 뒀다면 그대로 다시 켭니다
+    try{
+      await track.applyConstraints({advanced:[{torch:true}]});
+      cam.torch=true; tb.setAttribute('aria-pressed','true');
+    }catch(e){ cam.torchOK=false; tb.classList.add('off'); }
+  }
   unbusy(); setView('cam');
   cam.lastRun=0;
   cancelAnimationFrame(cam.raf);
@@ -942,19 +948,20 @@ async function startCam(){
 async function toggleTorch(){
   if(!cam.stream) return;
   if(!cam.torchOK){
-    toast('이 브라우저는 플래시를 제어할 수 없습니다. 아래 기기 카메라 앱을 쓰세요');
+    toast('이 브라우저는 조명을 제어할 수 없습니다. 아래 기기 카메라 앱을 쓰세요');
     return;
   }
   const track=cam.stream.getVideoTracks()[0];
   const want=!cam.torch;
   try{
     await track.applyConstraints({advanced:[{torch:want}]});
-    cam.torch=want;
+    cam.torch=want; cam.torchWanted=want;
     $('#btnTorch').setAttribute('aria-pressed',String(want));
+    toast(want?'조명을 켰습니다':'조명을 껐습니다');
   }catch(e){
     cam.torchOK=false;
     $('#btnTorch').classList.add('off');
-    toast('이 기기에서는 플래시를 켤 수 없습니다');
+    toast('이 기기에서는 조명을 켤 수 없습니다');
   }
 }
 function stopCam(){

@@ -327,7 +327,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.22';
+const BUILD='0.23';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2800;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -1659,7 +1659,9 @@ async function buildPdf(pages){
   return new Blob(parts,{type:'application/pdf'});
 }
 /* ---------------- 새 버전 확인 ---------------- */
-let lastCheck=0, newBuild=null;
+let lastCheck=0, newBuild=null, snoozeUntil=0, updateTimer=0;
+const CHECK_GAP=3*60*1000;      // 자동 확인 최소 간격
+const SNOOZE=30*60*1000;        // 나중에 를 누르면 이만큼 쉬었다 다시 알립니다
 function cmpBuild(a,b){
   const A=String(a).split('.').map(Number), B=String(b).split('.').map(Number);
   for(let i=0;i<Math.max(A.length,B.length);i++){
@@ -1670,20 +1672,28 @@ function cmpBuild(a,b){
 }
 async function checkUpdate(force){
   const now=Date.now();
-  if(!force && now-lastCheck<10*60*1000) return;
+  if(!force && now-lastCheck<CHECK_GAP) return false;
   lastCheck=now;
-  if(location.protocol==='file:') return;
+  if(location.protocol==='file:') return false;
   try{
     const url=location.href.split('#')[0].split('?')[0]+'?_='+now;
     const res=await fetch(url,{cache:'no-store'});
-    if(!res.ok) return;
+    if(!res.ok) return false;
     const txt=await res.text();
     const m=txt.match(/const\s+BUILD\s*=\s*'([\d.]+)'/);
-    if(!m || cmpBuild(m[1],BUILD)<=0) return;
+    if(!m || cmpBuild(m[1],BUILD)<=0) return false;
     newBuild=m[1];
-    $('#updateMsg').textContent=`새 버전 v${newBuild}이 나왔습니다`;
-    $('#updateBar').hidden=false;
-  }catch(e){ /* 오프라인이면 조용히 넘어갑니다 */ }
+    if(force || now>=snoozeUntil){
+      $('#updateMsg').textContent=`새 버전 v${newBuild}이 나왔습니다`;
+      $('#updateBar').hidden=false;
+      clearInterval(updateTimer); updateTimer=0;   // 찾았으니 그만 확인합니다
+    }
+    return true;
+  }catch(e){ return false; /* 오프라인이면 조용히 넘어갑니다 */ }
+}
+function startUpdateWatch(){
+  clearInterval(updateTimer);
+  updateTimer=setInterval(()=>checkUpdate(false),CHECK_GAP);
 }
 async function applyUpdate(){
   if(state.pages.length||state.work||state.imports.length){
@@ -1979,7 +1989,11 @@ document.addEventListener('contextmenu',e=>{
   if(e.target&&e.target.tagName==='CANVAS') e.preventDefault();
 });
 $('#btnUpdate').addEventListener('click',applyUpdate);
-$('#btnLater').addEventListener('click',()=>{ $('#updateBar').hidden=true; });
+$('#btnLater').addEventListener('click',()=>{
+  $('#updateBar').hidden=true;
+  snoozeUntil=Date.now()+SNOOZE;
+  startUpdateWatch();
+});
 document.addEventListener('visibilitychange',()=>{ if(document.hidden) stopCam(); });
 window.addEventListener('pagehide',stopCam);
 
@@ -1989,10 +2003,16 @@ document.title='Doc Scanner v'+BUILD;
 renderHome();
 syncChips();
 setView('home');
-setTimeout(()=>checkUpdate(true),1200);
+setTimeout(()=>checkUpdate(true),800);
+startUpdateWatch();
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden) checkUpdate(false); });
+window.addEventListener('focus',()=>checkUpdate(false));
 window.addEventListener('online',()=>checkUpdate(true));
-$('#buildTag').addEventListener('click',()=>{ checkUpdate(true); toast('새 버전을 확인합니다'); });
+$('#buildTag').addEventListener('click',async()=>{
+  toast('새 버전을 확인합니다');
+  const found=await checkUpdate(true);
+  if(!found) toast(`최신 버전입니다 (v${BUILD})`);
+});
 </script>
 </body>
 </html>

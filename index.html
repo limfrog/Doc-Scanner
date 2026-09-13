@@ -207,6 +207,17 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
 .link{font-size:12px;font-weight:650;color:var(--blue);text-decoration:underline;text-underline-offset:3px;padding:3px 5px}
 .link[disabled]{opacity:.4;text-decoration:none}
 
+/* 파일 이름 */
+.namebar{display:flex;align-items:center;gap:9px;margin:0 0 9px}
+.namebar .nlbl{flex:0 0 auto;font-size:12.5px;color:var(--ink-2)}
+.namebar input{
+  flex:1;min-width:0;padding:10px 11px;border-radius:10px;
+  background:var(--paper);border:1px solid var(--line);color:var(--ink);
+  font:inherit;font-size:14px;letter-spacing:-.01em}
+.namebar input::placeholder{color:var(--ink-2);opacity:.75}
+.namebar input:disabled{opacity:.45}
+.namebar .ext{flex:0 0 auto;font-size:12px;color:var(--ink-2)}
+
 /* 칩 */
 .chips{display:flex;gap:7px;overflow-x:auto;padding-bottom:2px;margin-bottom:9px;scrollbar-width:none}
 .chips::-webkit-scrollbar{display:none}
@@ -389,6 +400,11 @@ input[type=range][disabled]{opacity:.4}
       <button class="btn" id="btnPick">불러오기</button>
       <button class="btn ghost" id="btnNewDoc" disabled>새 문서</button>
     </div>
+    <div class="namebar">
+      <span class="nlbl">파일 이름</span>
+      <input id="fileName" type="text" autocomplete="off" spellcheck="false" disabled>
+      <span class="ext">.pdf / .jpg</span>
+    </div>
     <div class="row">
       <button class="btn" id="btnPdf" disabled>PDF 공유</button>
       <button class="btn" id="btnJpg" disabled>JPG 공유</button>
@@ -500,7 +516,7 @@ input[type=range][disabled]{opacity:.4}
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.26';
+const BUILD='0.27';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2800;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -1390,7 +1406,8 @@ function renderHome(){
   const n=state.pages.length;
   invalidateExports();
   schedulePrewarm();
-  ['#btnPdf','#btnJpg','#btnPdfSave','#btnJpgSave'].forEach(s=>$(s).disabled=!n);
+  ['#btnPdf','#btnJpg','#btnPdfSave','#btnJpgSave','#fileName'].forEach(s=>$(s).disabled=!n);
+  $('#fileName').placeholder='scan_'+stamp();
   $('#btnNewDoc').disabled=!n;
   $('#homeHint').textContent = n
     ? (isDirty() ? '아직 저장하지 않았습니다' : '모든 쪽을 저장했습니다')
@@ -1927,12 +1944,18 @@ async function deliver(files,forceSave){
   return 'saved';
 }
 function markExported(){ exportedVer=pagesVer; $('#homeHint').textContent='모든 쪽을 저장했습니다'; }
+function baseFileName(){
+  const el=$('#fileName');
+  const raw=(el?el.value:'').replace(/[\\/:*?"<>|\u0000-\u001f]/g,'').replace(/\s+/g,' ').trim().slice(0,60);
+  return raw || ('scan_'+stamp());
+}
 async function sendJpg(pages,label,forceSave){
   if(!pages.length) return;
-  const t=stamp();
+  const base=baseFileName();
   const files=pages.map((pg,i)=>{
     const num = label!=null ? label : i+1;
-    return new File([pg.blob],`scan_${t}_${String(num).padStart(2,'0')}.jpg`,{type:'image/jpeg'});
+    const one = pages.length===1 && label==null;
+    return new File([pg.blob],one?`${base}.jpg`:`${base}_${String(num).padStart(2,'0')}.jpg`,{type:'image/jpeg'});
   });
   const r=await deliver(files,forceSave);
   const whole = pages.length===state.pages.length && pages.every((p,i)=>p===state.pages[i]);
@@ -1948,7 +1971,7 @@ async function sendPdf(forceSave){
     catch(e){ unbusy(); toast('PDF를 만들지 못했습니다'); return; }
     unbusy();
   }
-  const file=new File([blob],`scan_${stamp()}.pdf`,{type:'application/pdf'});
+  const file=new File([blob],`${baseFileName()}.pdf`,{type:'application/pdf'});
   const r=await deliver([file],forceSave);
   if(r!=='cancelled') markExported();
   return r;
@@ -2079,6 +2102,7 @@ function resetAll(){
   state.pages=[]; state.work=null; state.imports=[]; previewData=null;
   cancelQueue();
   exportCache={ver:-1,pdf:null};
+  $('#fileName').value='';
   renderHome(); exportedVer=pagesVer; setView('home');
   toast('새 문서를 시작합니다');
 }

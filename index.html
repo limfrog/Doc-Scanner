@@ -516,7 +516,7 @@ input[type=range][disabled]{opacity:.4}
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.27';
+const BUILD='0.28';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2800;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -577,9 +577,32 @@ function toast(msg){
 function newCanvas(w,h){const c=document.createElement('canvas');c.width=w;c.height=h;return c;}
 function ctx2d(c){return c.getContext('2d',{willReadFrequently:true});}
 function toBlob(canvas,type,q){return new Promise(res=>canvas.toBlob(res,type,q));}
+/* 저장: 파일 선택창을 지원하면 그쪽으로, 아니면 브라우저 다운로드로 */
+async function saveFile(file){
+  if(window.showSaveFilePicker){
+    try{
+      const ext=(file.name.split('.').pop()||'bin').toLowerCase();
+      const handle=await window.showSaveFilePicker({
+        suggestedName:file.name,
+        types:[{description:ext.toUpperCase(),accept:{[file.type||'application/octet-stream']:['.'+ext]}}]
+      });
+      const w=await handle.createWritable();
+      await w.write(file);
+      await w.close();
+      return 'saved';
+    }catch(e){
+      if(e&&e.name==='AbortError') return 'cancelled';
+      // 지원은 하지만 실패한 경우 아래 방식으로 넘어갑니다
+    }
+  }
+  download(file,file.name);
+  return 'saved';
+}
 function download(blob,name){
   const url=URL.createObjectURL(blob);
-  const a=document.createElement('a'); a.href=url; a.download=name;
+  const a=document.createElement('a');
+  a.href=url; a.download=name; a.rel='noopener'; a.target='_self';
+  a.style.display='none';
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url),8000);
 }
@@ -1936,11 +1959,15 @@ async function deliver(files,forceSave){
       toast('공유 창을 열지 못해 기기에 저장합니다');
     }
   }
+  let done=0;
   for(let i=0;i<files.length;i++){
-    download(files[i],files[i].name);
-    if(i<files.length-1) await new Promise(r=>setTimeout(r,700));
+    const r=await saveFile(files[i]);
+    if(r==='cancelled') break;
+    done++;
+    if(i<files.length-1) await new Promise(r2=>setTimeout(r2,700));
   }
-  toast(files.length>1?`${files.length}개 파일을 저장했습니다`:'기기에 저장했습니다');
+  if(!done) return 'cancelled';
+  toast(done>1?`${done}개 파일을 저장했습니다`:'기기에 저장했습니다');
   return 'saved';
 }
 function markExported(){ exportedVer=pagesVer; $('#homeHint').textContent='모든 쪽을 저장했습니다'; }

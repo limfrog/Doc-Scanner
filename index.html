@@ -410,6 +410,7 @@ input[type=range][disabled]{opacity:.4}
       <button class="btn" id="btnJpg" disabled>JPG 공유</button>
     </div>
     <p class="hint" id="homeHint">기기 카메라로 찍으면 가장 선명하게 저장됩니다</p>
+    <p class="hint" id="iosSaveTip" hidden>기기에 저장하려면 공유 창에서 <b>파일에 저장</b>을 고르세요</p>
     <p class="hint" id="saveLine" hidden>기기에 바로 저장
       <button class="link" id="btnPdfSave" disabled>PDF</button>
       <button class="link" id="btnJpgSave" disabled>JPG</button>
@@ -516,7 +517,7 @@ input[type=range][disabled]{opacity:.4}
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.28';
+const BUILD='0.29';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2800;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -1926,6 +1927,9 @@ async function applyUpdate(){
 }
 
 /* ---------------- 내보내기: 공유 우선, 저장은 대비책 ---------------- */
+const IOS = /iP(hone|od|ad)/.test(navigator.userAgent)
+  || (navigator.maxTouchPoints>1 && /Macintosh/.test(navigator.userAgent));
+const DL_OK = !IOS;   // iOS는 blob 다운로드를 파일이 아니라 링크로 넘깁니다
 let SHARE_OK=false;
 try{
   const probe=new File([new Blob(['%PDF-1.4'],{type:'application/pdf'})],'probe.pdf',{type:'application/pdf'});
@@ -1956,8 +1960,12 @@ async function deliver(files,forceSave){
       return 'shared';
     }catch(e){
       if(e && (e.name==='AbortError'||e.name==='CanceledError')) return 'cancelled';
+      if(!DL_OK){ toast('공유 창을 열지 못했습니다. 잠시 후 다시 시도해 주세요'); return 'failed'; }
       toast('공유 창을 열지 못해 기기에 저장합니다');
     }
+  }
+  if(!DL_OK && forceSave){   // iOS에서 저장 경로가 요청된 경우에도 공유로 넘깁니다
+    try{ await navigator.share({files}); return 'shared'; }catch(e){ return 'cancelled'; }
   }
   let done=0;
   for(let i=0;i<files.length;i++){
@@ -1986,7 +1994,7 @@ async function sendJpg(pages,label,forceSave){
   });
   const r=await deliver(files,forceSave);
   const whole = pages.length===state.pages.length && pages.every((p,i)=>p===state.pages[i]);
-  if(whole && r!=='cancelled') markExported();
+  if(whole && (r==='shared'||r==='saved')) markExported();
   return r;
 }
 async function sendPdf(forceSave){
@@ -2000,7 +2008,7 @@ async function sendPdf(forceSave){
   }
   const file=new File([blob],`${baseFileName()}.pdf`,{type:'application/pdf'});
   const r=await deliver([file],forceSave);
-  if(r!=='cancelled') markExported();
+  if(r==='shared'||r==='saved') markExported();
   return r;
 }
 /* ---------------- 칩·슬라이더 ---------------- */
@@ -2185,7 +2193,8 @@ $('#btnPdf').addEventListener('click',()=>sendPdf(false));
 $('#btnJpg').addEventListener('click',()=>sendJpg(state.pages,null,false));
 $('#btnPdfSave').addEventListener('click',()=>sendPdf(true));
 $('#btnJpgSave').addEventListener('click',()=>sendJpg(state.pages,null,true));
-if(SHARE_OK){ $('#saveLine').hidden=false; }
+if(SHARE_OK && DL_OK){ $('#saveLine').hidden=false; }
+else if(SHARE_OK){ $('#iosSaveTip').hidden=false; }   // iOS: 공유 창의 '파일에 저장'으로 안내
 else{ $('#btnPdf').textContent='PDF 저장'; $('#btnJpg').textContent='JPG 저장'; }
 $('#btnAuto').addEventListener('click',()=>{
   const wk=state.work; if(!wk) return;

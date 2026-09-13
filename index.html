@@ -101,6 +101,11 @@ button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
 
 /* 카메라 */
 #stCam video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#0b0e14}
+.cam-btn{position:absolute;top:12px;right:12px;width:46px;height:46px;border-radius:50%;
+  background:rgba(12,16,22,.62);color:var(--paper);font-size:19px;display:grid;place-items:center;
+  border:1px solid rgba(255,255,255,.18);backdrop-filter:blur(4px)}
+.cam-btn[aria-pressed="true"]{background:var(--lamp);color:var(--lamp-ink);border-color:var(--lamp)}
+.cam-btn.off{opacity:.45}
 .cam-tip{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);background:rgba(12,16,22,.74);color:var(--paper);padding:8px 15px;border-radius:999px;font-size:13px;white-space:nowrap;pointer-events:none}
 .flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none}
 .flash.on{animation:fl .3s ease-out}
@@ -207,6 +212,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
   <section class="stage dark" id="stCam" hidden>
     <video id="camVideo" playsinline muted autoplay></video>
     <canvas id="camOv"></canvas>
+    <button class="cam-btn" id="btnTorch" aria-pressed="false" aria-label="플래시">⚡</button>
     <div class="flash" id="camFlash"></div>
     <div class="cam-tip" id="camTip">문서를 화면 안에 맞춰 주세요</div>
   </section>
@@ -321,7 +327,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lamp);outline-o
    촬영 → 가장자리 보정(원근 변환) → 배경 흰색화/잉크 강조 → JPG·PDF
    ========================================================= */
 
-const BUILD='0.20';
+const BUILD='0.21';
 const $ = s => document.querySelector(s);
 const MAX_SRC = 2800;        // 원본 작업 해상도(긴 변)
 const MAX_PREVIEW = 900;     // 보정 미리보기 해상도(긴 변)
@@ -897,7 +903,7 @@ function setView(v){
 /* ---------------- 실시간 촬영 (자동 셔터) ---------------- */
 const cam={
   stream:null, raf:0, lastRun:0, quad:null, stableMs:0, lastSeen:0,
-  auto:true, busy:false,
+  auto:true, busy:false, torch:false, torchOK:false,
 };
 const AUTO_HOLD=800;        // 이 시간만큼 흔들림 없이 잡히면 촬영
 const DET_LONG=320;         // 감지용 축소 프레임 긴 변
@@ -921,13 +927,44 @@ async function startCam(){
   v.srcObject=cam.stream;
   try{ await v.play(); }catch(e){}
   cam.quad=null; cam.stableMs=0; cam.lastSeen=0; cam.busy=false;
+  cam.torch=false;
+  const track=cam.stream.getVideoTracks()[0];
+  const caps=(track&&track.getCapabilities)?track.getCapabilities():{};
+  cam.torchOK=!!caps.torch;
+  const tb=$('#btnTorch');
+  tb.setAttribute('aria-pressed','false');
+  tb.classList.toggle('off',!cam.torchOK);
   unbusy(); setView('cam');
   cam.lastRun=0;
   cancelAnimationFrame(cam.raf);
   cam.raf=requestAnimationFrame(camLoop);
 }
+async function toggleTorch(){
+  if(!cam.stream) return;
+  if(!cam.torchOK){
+    toast('이 브라우저는 플래시를 제어할 수 없습니다. 아래 기기 카메라 앱을 쓰세요');
+    return;
+  }
+  const track=cam.stream.getVideoTracks()[0];
+  const want=!cam.torch;
+  try{
+    await track.applyConstraints({advanced:[{torch:want}]});
+    cam.torch=want;
+    $('#btnTorch').setAttribute('aria-pressed',String(want));
+  }catch(e){
+    cam.torchOK=false;
+    $('#btnTorch').classList.add('off');
+    toast('이 기기에서는 플래시를 켤 수 없습니다');
+  }
+}
 function stopCam(){
   cancelAnimationFrame(cam.raf); cam.raf=0;
+  if(cam.stream&&cam.torch){
+    const t=cam.stream.getVideoTracks()[0];
+    if(t){ try{ t.applyConstraints({advanced:[{torch:false}]}); }catch(e){} }
+  }
+  cam.torch=false;
+  const tb=$('#btnTorch'); if(tb) tb.setAttribute('aria-pressed','false');
   if(cam.stream){ cam.stream.getTracks().forEach(t=>t.stop()); cam.stream=null; }
   const v=$('#camVideo'); if(v) v.srcObject=null;
 }
@@ -1826,6 +1863,7 @@ $('#askSave').addEventListener('click',async()=>{
 /* ---------------- 버튼 ---------------- */
 $('#btnShoot').addEventListener('click',()=>{ cancelQueue(); startCam(); });
 $('#btnShutter').addEventListener('click',shoot);
+$('#btnTorch').addEventListener('click',toggleTorch);
 $('#btnAutoToggle').addEventListener('click',e=>{
   cam.auto=!cam.auto; cam.stableMs=0;
   e.currentTarget.setAttribute('aria-pressed',String(cam.auto));
